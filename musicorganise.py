@@ -147,27 +147,44 @@ def get_acoustid(file_path, revalidate=False):
         duration, fingerprint = acoustid.fingerprint_file(file_path)
         
         # Perform AcoustID lookup
-        results = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration)
+        response = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration)
         
-        # AcoustID returns a nested structure, we need to handle that correctly
-        for score, result in results:
-            if 'recordings' in result:
-                recording = result['recordings'][0]  # Take the first recording
-                rid = recording['id']
-                title = recording.get('title', 'Unknown Title')
-                
-                # Extract the artist if available
-                if 'artists' in recording and len(recording['artists']) > 0:
-                    artist = recording['artists'][0].get('name', 'Unknown Artist')
-                else:
-                    artist = 'Unknown Artist'
-                
-                print(f"AcoustID: {rid}, Title: {title}, Artist: {artist}")
-                
-                # Cache the AcoustID result
-                file_cache[file_path]['acoustid'] = rid
-                save_cache()
-                return rid
+        # Check if the response is successful
+        if response['status'] != 'ok':
+            error_message = response.get('error', {}).get('message', 'Unknown error')
+            print(f"AcoustID lookup failed for {file_path}: {error_message}")
+            return None
+        
+        results = response.get('results', [])
+        if not results:
+            print(f"No AcoustID results for {file_path}")
+            return None
+        
+        # Get the best match (highest score)
+        best_result = max(results, key=lambda x: x.get('score', 0))
+        
+        # Extract recording information
+        recordings = best_result.get('recordings', [])
+        if not recordings:
+            print(f"No recordings found for {file_path}")
+            return None
+        
+        recording = recordings[0]  # Use the first recording
+        rid = recording.get('id')
+        title = recording.get('title', 'Unknown Title')
+        
+        # Extract the artist if available
+        artists = recording.get('artists', [])
+        artist_name = 'Unknown Artist'
+        if artists:
+            artist_name = artists[0].get('name', 'Unknown Artist')
+        
+        print(f"AcoustID: {rid}, Title: {title}, Artist: {artist_name}")
+        
+        # Cache the AcoustID result
+        file_cache[file_path]['acoustid'] = rid
+        save_cache()
+        return rid
     except Exception as e:
         print(f"AcoustID lookup failed for {file_path}: {e}")
         return None
