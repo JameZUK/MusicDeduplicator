@@ -127,7 +127,7 @@ def find_duplicates(directory, verbose=False):
 
     return duplicates
 
-def resolve_duplicates(duplicates, action='list', move_dir=None, verbose=False):
+def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, verbose=False):
     """Resolves duplicates by either listing, moving, or deleting them."""
     for duplicate_set in duplicates:
         best_file = None
@@ -154,7 +154,7 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, verbose=False):
             for file in to_delete:
                 print(f"To delete: {file}")
         elif action == 'move' and move_dir:
-            move_duplicates(to_delete, best_file, move_dir)
+            move_duplicates(to_delete, best_file, move_dir, base_dir)
         elif action == 'delete':
             delete_duplicates(to_delete)
 
@@ -259,4 +259,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
