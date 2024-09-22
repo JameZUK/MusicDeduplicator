@@ -143,19 +143,31 @@ def get_acoustid(file_path, revalidate=False):
         return file_cache[file_path]['acoustid']
     
     try:
+        # Generate fingerprint and duration
         duration, fingerprint = acoustid.fingerprint_file(file_path)
+        
+        # Perform AcoustID lookup
         results = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration)
         
-        # Handle variable-length results safely
-        for result in results:
-            rid = result[1] if len(result) > 1 else None
-            title = result[2] if len(result) > 2 else "Unknown Title"
-            artist = result[3] if len(result) > 3 else "Unknown Artist"
-            print(f"AcoustID: {rid}, Title: {title}, Artist: {artist}")
-            # Cache the AcoustID
-            file_cache[file_path]['acoustid'] = rid
-            save_cache()
-            return rid
+        # AcoustID returns a nested structure, we need to handle that correctly
+        for score, result in results:
+            if 'recordings' in result:
+                recording = result['recordings'][0]  # Take the first recording
+                rid = recording['id']
+                title = recording.get('title', 'Unknown Title')
+                
+                # Extract the artist if available
+                if 'artists' in recording and len(recording['artists']) > 0:
+                    artist = recording['artists'][0].get('name', 'Unknown Artist')
+                else:
+                    artist = 'Unknown Artist'
+                
+                print(f"AcoustID: {rid}, Title: {title}, Artist: {artist}")
+                
+                # Cache the AcoustID result
+                file_cache[file_path]['acoustid'] = rid
+                save_cache()
+                return rid
     except Exception as e:
         print(f"AcoustID lookup failed for {file_path}: {e}")
         return None
