@@ -14,6 +14,22 @@ import json
 CACHE_FILE = 'file_cache.json'
 file_cache = {}
 
+# Summary statistics
+summary_stats = {
+    'total_files_processed': 0,
+    'total_duplicates_found': 0,
+    'total_files_to_remove': 0,
+    'total_storage_to_save': 0,
+    'files_by_format': {
+        'mp3': 0,
+        'flac': 0,
+        'ogg': 0,
+        'wav': 0,
+        'aac': 0,
+        'm4a': 0,
+    }
+}
+
 # Load cached data if it exists
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, 'r') as f:
@@ -46,21 +62,28 @@ def get_file_metadata(file_path):
     
     file_extension = os.path.splitext(file_path)[1].lower()
 
+    # Update file count by format
     if file_extension == '.flac':
         file_metadata['bitrate'] = FLAC(file_path).info.bitrate
         file_metadata['format'] = 'lossless'
+        summary_stats['files_by_format']['flac'] += 1
     elif file_extension == '.mp3':
         file_metadata['bitrate'] = MP3(file_path).info.bitrate
         file_metadata['format'] = 'lossy'
+        summary_stats['files_by_format']['mp3'] += 1
     elif file_extension == '.ogg':
         file_metadata['bitrate'] = OggVorbis(file_path).info.bitrate
         file_metadata['format'] = 'lossy'
+        summary_stats['files_by_format']['ogg'] += 1
     elif file_extension == '.wav':
         file_metadata['bitrate'] = WAVE(file_path).info.bitrate
         file_metadata['format'] = 'uncompressed'
+        summary_stats['files_by_format']['wav'] += 1
     elif file_extension in ['.m4a', '.aac']:
         file_metadata['bitrate'] = MP4(file_path).info.bitrate
         file_metadata['format'] = 'lossy'
+        summary_stats['files_by_format']['aac'] += 1
+        summary_stats['files_by_format']['m4a'] += 1
     else:
         return None
 
@@ -71,7 +94,6 @@ def find_duplicates(directory, verbose=False):
     """Recursively scans directory for music files and identifies duplicates based on metadata."""
     files_by_song = {}
     duplicates = []
-    file_count = 0
     start_time = time.time()
 
     for root, _, files in os.walk(directory):
@@ -89,23 +111,19 @@ def find_duplicates(directory, verbose=False):
                 files_by_song[key] = []
             files_by_song[key].append(file_path)
 
-            file_count += 1
+            summary_stats['total_files_processed'] += 1
 
             # Verbose output
-            if verbose and file_count % 100 == 0:
+            if verbose and summary_stats['total_files_processed'] % 100 == 0:
                 elapsed_time = time.time() - start_time
-                files_per_sec = file_count / elapsed_time
-                print(f"Processed {file_count} files. Speed: {files_per_sec:.2f} files/sec")
+                files_per_sec = summary_stats['total_files_processed'] / elapsed_time
+                print(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
 
     # Identify duplicates
     for file_list in files_by_song.values():
         if len(file_list) > 1:
             duplicates.append(file_list)
-
-    # Final verbose output
-    if verbose:
-        total_time = time.time() - start_time
-        print(f"Finished processing {file_count} files in {total_time:.2f} seconds. Average speed: {file_count/total_time:.2f} files/sec.")
+            summary_stats['total_duplicates_found'] += 1
 
     return duplicates
 
@@ -126,6 +144,10 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, verbose=False):
                 best_metadata = metadata
             else:
                 to_delete.append(file_path)
+
+        # Update summary statistics
+        summary_stats['total_files_to_remove'] += len(to_delete)
+        summary_stats['total_storage_to_save'] += sum(os.path.getsize(f) for f in to_delete)
 
         if action == 'list':
             print(f"Best file: {best_file}")
@@ -152,6 +174,17 @@ def delete_duplicates(to_delete):
     for file_path in to_delete:
         print(f"Deleting {file_path}")
         os.remove(file_path)
+
+def display_summary():
+    """Displays the summary statistics after processing."""
+    print("\nSummary:")
+    print(f"Total files processed: {summary_stats['total_files_processed']}")
+    print(f"Total duplicates found: {summary_stats['total_duplicates_found']}")
+    print(f"Total files to remove: {summary_stats['total_files_to_remove']}")
+    print(f"Estimated storage saved: {summary_stats['total_storage_to_save'] / (1024 * 1024):.2f} MB")
+    print("\nFiles processed by format:")
+    for format, count in summary_stats['files_by_format'].items():
+        print(f"  {format.upper()}: {count} files")
 
 def main():
     parser = argparse.ArgumentParser(description="Music collection deduplication script.")
@@ -180,7 +213,9 @@ def main():
     save_cache()
 
     total_time = time.time() - start_time
-    print(f"Completed in {total_time:.2f} seconds.")
+    print(f"\nCompleted in {total_time:.2f} seconds.")
+    
+    display_summary()
 
 if __name__ == "__main__":
     main()
