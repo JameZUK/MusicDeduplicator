@@ -242,7 +242,7 @@ def main():
 
     if duplicates:
         print(f"Found {len(duplicates)} sets of duplicates.")
-        resolve_duplicates(duplicates, args.action, args.move_dir, verbose=args.verbose)
+        resolve_duplicates(duplicates, args.action, args.move_dir, base_dir=args.path, verbose=args.verbose)
     else:
         print("No duplicates found.")
 
@@ -259,3 +259,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
