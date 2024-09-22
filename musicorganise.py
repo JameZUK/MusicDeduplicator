@@ -6,6 +6,7 @@ import acoustid
 from fuzzywuzzy import fuzz
 from mutagen import File
 import time
+import gc  # For garbage collection
 
 # Configuration file for storing API key and fuzzy threshold
 CONFIG_FILE = 'config.json'
@@ -68,8 +69,11 @@ file_cache = load_cache()
 
 # Save cache to file for persistence
 def save_cache():
-    with open(CACHE_FILE, 'w') as f:
-        json.dump(file_cache, f)
+    try:
+        with open(CACHE_FILE, 'w') as f:
+            json.dump(file_cache, f)
+    except Exception as e:
+        print(f"Error saving cache: {e}")
 
 def validate_cached_data(file_path):
     """Re-validates the cached metadata and AcoustID fingerprint."""
@@ -107,7 +111,7 @@ def get_file_metadata(file_path, revalidate=False):
             # Update or add the cached metadata
             file_cache.setdefault(file_path, {})
             file_cache[file_path]['metadata'] = file_metadata
-            save_cache()
+            # Removed save_cache() call
             return file_metadata
     except Exception as e:
         print(f"Failed to get metadata for {file_path}: {e}")
@@ -129,7 +133,7 @@ def get_acoustid(file_path, revalidate=False):
 
         results = response.get('results', [])
         if not results:
-            print(f"No AcoustID results for {file_path}")
+            # print(f"No AcoustID results for {file_path}")
             return None
 
         # Get the best match (highest score)
@@ -138,7 +142,7 @@ def get_acoustid(file_path, revalidate=False):
         # Extract recording information
         recordings = best_result.get('recordings', [])
         if not recordings:
-            print(f"No recordings found for {file_path}")
+            # print(f"No recordings found for {file_path}")
             return None
 
         recording = recordings[0]  # Use the first recording
@@ -154,7 +158,7 @@ def get_acoustid(file_path, revalidate=False):
         # Cache the AcoustID result
         file_cache.setdefault(file_path, {})
         file_cache[file_path]['acoustid'] = rid
-        save_cache()
+        # Removed save_cache() call
         return rid
     except acoustid.NoBackendError:
         print("Chromaprint library/tool not found. Please install chromaprint or fpcalc.")
@@ -182,48 +186,61 @@ def find_duplicates(directory, verbose=False):
     files_by_song = {}
     duplicates = []
     start_time = time.time()
+    file_paths = []
 
+    # Collect all file paths
     for root, _, files in os.walk(directory):
         for file in files:
             file_path = os.path.join(root, file)
             if not file.lower().endswith(('.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac')):
                 continue
+            file_paths.append(file_path)
 
-            # Use cached data if available, do not revalidate
-            metadata = get_file_metadata(file_path)
-            acoustid_rid = get_acoustid(file_path)
-            if not metadata:
-                continue
+    batch_size = 100  # Adjust batch size as needed
+    for i in range(0, len(file_paths), batch_size):
+        batch = file_paths[i:i+batch_size]
+        process_batch(batch, files_by_song, verbose)
+        save_cache()  # Save cache after each batch
+        gc.collect()  # Force garbage collection
 
-            # Use AcoustID for exact matching when available, fall back on fuzzy matching if no AcoustID is found
-            if acoustid_rid:
-                key = acoustid_rid
-                match_type = 'AcoustID'
-            else:
-                key = (metadata['artist'], metadata['title'], metadata['album'])
-                match_type = 'Fuzzy'
-
-            # Find potential duplicates by key
-            if key in files_by_song:
-                files_by_song[key].append((file_path, match_type))
-            else:
-                files_by_song[key] = [(file_path, match_type)]
-
-            summary_stats['total_files_processed'] += 1
-
-            # Verbose output
-            if verbose and summary_stats['total_files_processed'] % 100 == 0:
-                elapsed_time = time.time() - start_time
-                files_per_sec = summary_stats['total_files_processed'] / elapsed_time
-                print(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
-
-    # Identify duplicates
+    # Identify duplicates after processing all batches
     for file_list in files_by_song.values():
         if len(file_list) > 1:
             duplicates.append(file_list)
             summary_stats['total_duplicates_found'] += 1
 
     return duplicates
+
+def process_batch(batch, files_by_song, verbose):
+    """Processes a batch of files."""
+    for file_path in batch:
+        # Use cached data if available, do not revalidate
+        metadata = get_file_metadata(file_path)
+        acoustid_rid = get_acoustid(file_path)
+        if not metadata:
+            continue
+
+        # Use AcoustID for exact matching when available, fall back on fuzzy matching if no AcoustID is found
+        if acoustid_rid:
+            key = acoustid_rid
+            match_type = 'AcoustID'
+        else:
+            key = (metadata['artist'], metadata['title'], metadata['album'])
+            match_type = 'Fuzzy'
+
+        # Find potential duplicates by key
+        if key in files_by_song:
+            files_by_song[key].append((file_path, match_type))
+        else:
+            files_by_song[key] = [(file_path, match_type)]
+
+        summary_stats['total_files_processed'] += 1
+
+        # Verbose output
+        if verbose and summary_stats['total_files_processed'] % 100 == 0:
+            elapsed_time = time.time() - start_time
+            files_per_sec = summary_stats['total_files_processed'] / elapsed_time
+            print(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
 
 def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, verbose=False):
     """Resolves duplicates by either listing, moving, or deleting them."""
@@ -271,7 +288,7 @@ def move_duplicates(to_delete, original_file, move_dir, base_dir):
 
         # Debugging output to check paths
         print(f"Moving {file_path} to {target_path} (Type: {match_type})")
-        print(f"Creating directory: {target_dir_path}")
+        # print(f"Creating directory: {target_dir_path}")
 
         # Ensure the target directory exists
         if not os.path.exists(target_dir_path):
@@ -325,6 +342,7 @@ def main():
     else:
         print("No duplicates found.")
 
+    # Save cache at the end
     save_cache()
 
     total_time = time.time() - start_time
