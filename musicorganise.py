@@ -20,7 +20,8 @@ summary_stats = {
     'total_duplicates_found': 0,
     'total_files_to_remove': 0,
     'total_storage_to_save': 0,
-    'empty_folders_removed': 0,
+    'folders_deleted': 0,
+    'folders_moved': 0,
     'files_by_format': {
         'mp3': 0,
         'flac': 0,
@@ -185,6 +186,20 @@ def delete_duplicates(to_delete):
         print(f"Deleting {file_path}")
         os.remove(file_path)
 
+def move_or_delete_folder(folder_path, move_dir=None, action='move', verbose=False):
+    """Move or delete folders, depending on the action selected."""
+    if action == 'move' and move_dir:
+        relative_path = os.path.relpath(folder_path)
+        target_path = os.path.join(move_dir, relative_path)
+
+        print(f"Moving folder {folder_path} to {target_path}")
+        shutil.move(folder_path, target_path)
+        summary_stats['folders_moved'] += 1
+    elif action == 'delete':
+        print(f"Deleting folder {folder_path}")
+        shutil.rmtree(folder_path)
+        summary_stats['folders_deleted'] += 1
+
 def is_folder_empty_of_media(path, media_extensions=('.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac')):
     """Checks if a folder contains any media files. Returns True if no media files are found."""
     for root, _, files in os.walk(path):
@@ -193,21 +208,13 @@ def is_folder_empty_of_media(path, media_extensions=('.mp3', '.flac', '.ogg', '.
                 return False  # The folder contains at least one media file
     return True
 
-def remove_empty_folders(path, verbose=False):
-    """Removes folders that are empty of media files."""
+def process_folders(path, action='move', move_dir=None, verbose=False):
+    """Processes folders based on the action (move or delete), deletes only if no media files remain."""
     for root, dirs, _ in os.walk(path, topdown=False):
         for dir in dirs:
             dir_path = os.path.join(root, dir)
-            if is_folder_empty_of_media(dir_path):  # Remove only if no media files are found
-                try:
-                    os.rmdir(dir_path)
-                    summary_stats['empty_folders_removed'] += 1
-                    if verbose:
-                        print(f"Removed empty folder: {dir_path}")
-                except OSError:
-                    # Catch any errors if the folder is not empty or if there are permission issues
-                    if verbose:
-                        print(f"Could not remove folder: {dir_path}")
+            if action == 'delete' and is_folder_empty_of_media(dir_path):
+                move_or_delete_folder(dir_path, move_dir, action, verbose)
 
 def display_summary():
     """Displays the summary statistics after processing."""
@@ -216,7 +223,8 @@ def display_summary():
     print(f"Total duplicates found: {summary_stats['total_duplicates_found']}")
     print(f"Total files to remove: {summary_stats['total_files_to_remove']}")
     print(f"Estimated storage saved: {summary_stats['total_storage_to_save'] / (1024 * 1024):.2f} MB")
-    print(f"Empty folders removed: {summary_stats['empty_folders_removed']}")
+    print(f"Folders moved: {summary_stats['folders_moved']}")
+    print(f"Folders deleted: {summary_stats['folders_deleted']}")
     print("\nFiles processed by format:")
     for format, count in summary_stats['files_by_format'].items():
         print(f"  {format.upper()}: {count} files")
@@ -227,7 +235,7 @@ def main():
     parser.add_argument('-p', '--path', required=True, help="Path to the music directory to scan.")
     parser.add_argument('-a', '--action', required=True, choices=['list', 'move', 'delete'], help="Action to take: list, move, or delete duplicates.")
     parser.add_argument('-m', '--move-dir', help="Directory to move duplicates to (required if action is 'move').")
-    parser.add_argument('-r', '--remove-empty-folders', action='store_true', help="Remove empty folders after files are deleted.")
+    parser.add_argument('-r', '--remove-empty-folders', action='store_true', help="Remove or move empty folders after files are processed.")
     parser.add_argument('-v', '--verbose', action='store_true', help="Enable verbose output with processing speed.")
 
     args = parser.parse_args()
@@ -248,9 +256,10 @@ def main():
 
     save_cache()
 
+    # Process folders (move or delete) if the option is selected
     if args.remove_empty_folders:
         print("\nChecking for empty folders...")
-        remove_empty_folders(args.path, verbose=args.verbose)
+        process_folders(args.path, action=args.action, move_dir=args.move_dir, verbose=args.verbose)
 
     total_time = time.time() - start_time
     print(f"\nCompleted in {total_time:.2f} seconds.")
