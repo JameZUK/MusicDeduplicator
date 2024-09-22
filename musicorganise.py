@@ -114,14 +114,13 @@ def get_file_metadata(file_path, revalidate=False):
         return None
 
 def get_acoustid(file_path, revalidate=False):
-    """Fetches or re-validates the AcoustID fingerprint and caches it."""
+    """Fetches or re-validates the AcoustID fingerprint and caches it for performance."""
     if not revalidate and file_path in file_cache and 'acoustid' in file_cache[file_path]:
         return file_cache[file_path]['acoustid']
 
     try:
-        # Use context manager to ensure file is closed properly
-        with open(file_path, 'rb'):
-            duration, fingerprint = acoustid.fingerprint_file(file_path)
+        # No need to open the file; acoustid.fingerprint_file handles it
+        duration, fingerprint = acoustid.fingerprint_file(file_path)
         response = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration, meta='recordings artists')
         if response['status'] != 'ok':
             error_message = response.get('error', {}).get('message', 'Unknown error')
@@ -192,7 +191,9 @@ def find_duplicates(directory, verbose=False):
             if not file.lower().endswith(('.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac')):
                 continue
 
-            metadata, acoustid_rid = validate_cached_data(file_path)
+            # Use cached data if available, do not revalidate
+            metadata = get_file_metadata(file_path)
+            acoustid_rid = get_acoustid(file_path)
             if not metadata:
                 continue
 
@@ -205,10 +206,8 @@ def find_duplicates(directory, verbose=False):
                 match_type = 'Fuzzy'
 
             # Find potential duplicates by key
-            duplicate_found = False
             if key in files_by_song:
                 files_by_song[key].append((file_path, match_type))
-                duplicate_found = True
             else:
                 files_by_song[key] = [(file_path, match_type)]
 
