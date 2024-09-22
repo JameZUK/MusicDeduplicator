@@ -1,6 +1,8 @@
 import os
+import json
 import shutil
 import argparse
+import acoustid
 from fuzzywuzzy import fuzz
 from mutagen import File
 from mutagen.flac import FLAC
@@ -9,9 +11,42 @@ from mutagen.oggvorbis import OggVorbis
 from mutagen.wave import WAVE
 from mutagen.mp4 import MP4
 import time
-import json
 
-# Dictionary to store cached metadata of files to improve performance
+# Configuration file for storing API key and fuzzy threshold
+CONFIG_FILE = 'config.json'
+
+# Load or initialize configuration
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_config(config):
+    with open(CONFIG_FILE, 'w') as f:
+        json.dump(config, f, indent=4)
+
+# Load AcoustID API key and Fuzzy Threshold from config
+config = load_config()
+ACOUSTID_API_KEY = config.get('acoustid_api_key', None)
+FUZZY_THRESHOLD = config.get('fuzzy_threshold', 90)  # Default threshold is 90
+
+# If no API key, prompt user and save it to the config file
+if not ACOUSTID_API_KEY:
+    ACOUSTID_API_KEY = input("Please enter your AcoustID API key: ")
+    config['acoustid_api_key'] = ACOUSTID_API_KEY
+    save_config(config)
+
+# If no fuzzy threshold exists, prompt user to set it
+if 'fuzzy_threshold' not in config:
+    try:
+        FUZZY_THRESHOLD = int(input(f"Please enter the fuzzy match threshold (default is 90): ") or 90)
+    except ValueError:
+        FUZZY_THRESHOLD = 90
+    config['fuzzy_threshold'] = FUZZY_THRESHOLD
+    save_config(config)
+
+# Dictionary to store cached metadata and fingerprints
 CACHE_FILE = 'file_cache.json'
 file_cache = {}
 
@@ -33,9 +68,6 @@ summary_stats = {
     }
 }
 
-# Fuzzy match threshold (90% similarity considered a match)
-FUZZY_THRESHOLD = 90
-
 # Load cached data if it exists
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, 'r') as f:
@@ -46,10 +78,18 @@ def save_cache():
     with open(CACHE_FILE, 'w') as f:
         json.dump(file_cache, f)
 
-def get_file_metadata(file_path):
-    """Fetches metadata of the music file using Mutagen and caches it for performance."""
+def validate_cached_data(file_path):
+    """Re-validates the cached metadata and AcoustID fingerprint."""
     if file_path in file_cache:
-        return file_cache[file_path]
+        metadata = get_file_metadata(file_path, revalidate=True)
+        acoustid_rid = get_acoustid(file_path, revalidate=True)
+        return metadata, acoustid_rid
+    return get_file_metadata(file_path), get_acoustid(file_path)
+
+def get_file_metadata(file_path, revalidate=False):
+    """Fetches or re-validates metadata of the music file using Mutagen and caches it for performance."""
+    if file_path in file_cache and not revalidate:
+        return file_cache[file_path].get('metadata')
     
     file_metadata = {}
     file_metadata['size'] = os.path.getsize(file_path)
@@ -92,8 +132,26 @@ def get_file_metadata(file_path):
     else:
         return None
 
-    file_cache[file_path] = file_metadata
+    # Update or add the cached metadata
+    file_cache[file_path] = {'metadata': file_metadata}
+    save_cache()
     return file_metadata
+
+def get_acoustid(file_path, revalidate=False):
+    """Fetches or re-validates the AcoustID fingerprint and caches it."""
+    if file_path in file_cache and 'acoustid' in file_cache[file_path] and not revalidate:
+        return file_cache[file_path]['acoustid']
+    
+    try:
+        duration, fingerprint = acoustid.fingerprint_file(file_path)
+        results = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration)
+        for score, rid, title, artist in results:
+            file_cache[file_path]['acoustid'] = rid  # Cache AcoustID identifier
+            save_cache()
+            return rid
+    except Exception as e:
+        print(f"AcoustID lookup failed for {file_path}: {e}")
+        return None
 
 def fuzzy_match(metadata1, metadata2):
     """Performs fuzzy matching between two metadata sets (title, artist, album) and returns the similarity percentage."""
@@ -107,7 +165,7 @@ def fuzzy_match(metadata1, metadata2):
     return avg_match
 
 def find_duplicates(directory, verbose=False):
-    """Recursively scans directory for music files and identifies duplicates based on fuzzy metadata matching."""
+    """Recursively scans directory for music files and identifies duplicates based on fuzzy metadata matching and AcoustID."""
     files_by_song = {}
     duplicates = []
     start_time = time.time()
@@ -118,21 +176,30 @@ def find_duplicates(directory, verbose=False):
             if not file.lower().endswith(('.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac')):
                 continue
 
-            metadata = get_file_metadata(file_path)
+            metadata, acoustid_rid = validate_cached_data(file_path)
             if not metadata:
                 continue
 
-            # Find potential duplicates by fuzzy matching
+            # Use AcoustID for exact matching when available, fall back on fuzzy matching if no AcoustID is found
+            if acoustid_rid:
+                key = (acoustid_rid, metadata['artist'], metadata['title'], metadata['album'])
+            else:
+                key = (None, metadata['artist'], metadata['title'], metadata['album'])
+
+            # Find potential duplicates by AcoustID or fuzzy matching
             duplicate_found = False
-            for key, file_list in files_by_song.items():
-                match_percentage = fuzzy_match(metadata, key)
-                if match_percentage >= FUZZY_THRESHOLD:
-                    file_list.append((file_path, match_percentage))
+            for existing_key, file_list in files_by_song.items():
+                if acoustid_rid and existing_key[0] == acoustid_rid:
+                    file_list.append((file_path, 100, 'AcoustID'))  # Exact AcoustID match
+                    duplicate_found = True
+                    break
+                elif fuzzy_match(metadata, {'artist': existing_key[1], 'title': existing_key[2], 'album': existing_key[3]}) >= FUZZY_THRESHOLD:
+                    file_list.append((file_path, fuzz.ratio(metadata['title'], existing_key[2]), 'Fuzzy'))  # Fuzzy match based on metadata
                     duplicate_found = True
                     break
 
             if not duplicate_found:
-                files_by_song[(metadata['artist'], metadata['title'], metadata['album'])] = [(file_path, 100)]  # Add the first file with 100% match
+                files_by_song[key] = [(file_path, 100, 'AcoustID' if acoustid_rid else 'Fuzzy')]  # Add the first file
 
             summary_stats['total_files_processed'] += 1
 
@@ -157,16 +224,17 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, 
         best_metadata = None
         to_delete = []
 
-        for file_path, match_percentage in duplicate_set:
-            metadata = get_file_metadata(file_path)
+        for file_path, match_percentage, match_type in duplicate_set:
+            # Revalidate metadata and acoustid before taking action
+            metadata, _ = validate_cached_data(file_path)
 
             if best_file is None or (metadata['format'] == 'lossless' and (best_metadata is None or metadata['bitrate'] > best_metadata['bitrate'])):
                 if best_file:
-                    to_delete.append((best_file, match_percentage))
+                    to_delete.append((best_file, match_percentage, match_type))
                 best_file = file_path
                 best_metadata = metadata
             else:
-                to_delete.append((file_path, match_percentage))
+                to_delete.append((file_path, match_percentage, match_type))
 
         # Update summary statistics
         summary_stats['total_files_to_remove'] += len(to_delete)
@@ -174,8 +242,8 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, 
 
         if action == 'list':
             print(f"Best file: {best_file}")
-            for file, percentage in to_delete:
-                print(f"To delete: {file} (Match: {percentage:.2f}%)")
+            for file, percentage, match_type in to_delete:
+                print(f"To delete: {file} (Match: {percentage:.2f}%, Type: {match_type})")
         elif action == 'move' and move_dir:
             move_duplicates(to_delete, best_file, move_dir, base_dir)
         elif action == 'delete':
@@ -183,7 +251,7 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, 
 
 def move_duplicates(to_delete, original_file, move_dir, base_dir):
     """Moves duplicate files to a new directory while keeping the folder structure intact."""
-    for file_path, match_percentage in to_delete:
+    for file_path, match_percentage, match_type in to_delete:
         # Create the relative path based on the base directory (i.e., the root of the music folder being processed)
         relative_path = os.path.relpath(file_path, start=base_dir)
         
@@ -192,7 +260,7 @@ def move_duplicates(to_delete, original_file, move_dir, base_dir):
         target_dir_path = os.path.dirname(target_path)
         
         # Debugging output to check paths
-        print(f"Moving {file_path} to {target_path} (Match: {match_percentage:.2f}%)")
+        print(f"Moving {file_path} to {target_path} (Match: {match_percentage:.2f}%, Type: {match_type})")
         print(f"Creating directory: {target_dir_path}")
         
         # Ensure the target directory exists
@@ -204,8 +272,8 @@ def move_duplicates(to_delete, original_file, move_dir, base_dir):
 
 def delete_duplicates(to_delete):
     """Deletes duplicate files."""
-    for file_path, match_percentage in to_delete:
-        print(f"Deleting {file_path} (Match: {match_percentage:.2f}%)")
+    for file_path, match_percentage, match_type in to_delete:
+        print(f"Deleting {file_path} (Match: {match_percentage:.2f}%, Type: {match_type})")
         os.remove(file_path)
 
 def display_summary():
