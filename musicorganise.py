@@ -20,6 +20,7 @@ summary_stats = {
     'total_duplicates_found': 0,
     'total_files_to_remove': 0,
     'total_storage_to_save': 0,
+    'empty_folders_removed': 0,
     'files_by_format': {
         'mp3': 0,
         'flac': 0,
@@ -175,6 +176,17 @@ def delete_duplicates(to_delete):
         print(f"Deleting {file_path}")
         os.remove(file_path)
 
+def remove_empty_folders(path, verbose=False):
+    """Removes empty folders after file deletion."""
+    for root, dirs, _ in os.walk(path, topdown=False):
+        for dir in dirs:
+            dir_path = os.path.join(root, dir)
+            if not os.listdir(dir_path):  # Check if the folder is empty
+                os.rmdir(dir_path)
+                summary_stats['empty_folders_removed'] += 1
+                if verbose:
+                    print(f"Removed empty folder: {dir_path}")
+
 def display_summary():
     """Displays the summary statistics after processing."""
     print("\nSummary:")
@@ -182,6 +194,7 @@ def display_summary():
     print(f"Total duplicates found: {summary_stats['total_duplicates_found']}")
     print(f"Total files to remove: {summary_stats['total_files_to_remove']}")
     print(f"Estimated storage saved: {summary_stats['total_storage_to_save'] / (1024 * 1024):.2f} MB")
+    print(f"Empty folders removed: {summary_stats['empty_folders_removed']}")
     print("\nFiles processed by format:")
     for format, count in summary_stats['files_by_format'].items():
         print(f"  {format.upper()}: {count} files")
@@ -192,6 +205,7 @@ def main():
     parser.add_argument('-p', '--path', required=True, help="Path to the music directory to scan.")
     parser.add_argument('-a', '--action', required=True, choices=['list', 'move', 'delete'], help="Action to take: list, move, or delete duplicates.")
     parser.add_argument('-m', '--move-dir', help="Directory to move duplicates to (required if action is 'move').")
+    parser.add_argument('-r', '--remove-empty-folders', action='store_true', help="Remove empty folders after files are deleted.")
     parser.add_argument('-v', '--verbose', action='store_true', help="Enable verbose output with processing speed.")
 
     args = parser.parse_args()
@@ -211,6 +225,10 @@ def main():
         print("No duplicates found.")
 
     save_cache()
+
+    if args.remove_empty_folders:
+        print("\nChecking for empty folders...")
+        remove_empty_folders(args.path, verbose=args.verbose)
 
     total_time = time.time() - start_time
     print(f"\nCompleted in {total_time:.2f} seconds.")
