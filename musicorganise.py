@@ -81,32 +81,34 @@ def get_file_metadata(file_path, revalidate=False):
     """Fetches or re-validates metadata of the music file using Mutagen and caches it for performance."""
     if not revalidate and file_path in file_cache and 'metadata' in file_cache[file_path]:
         return file_cache[file_path]['metadata']
-    
+
     try:
-        file_metadata = {}
-        file_metadata['size'] = os.path.getsize(file_path)
-        file_metadata['mtime'] = os.path.getmtime(file_path)
+        # Use context manager to ensure file is closed properly
+        with open(file_path, 'rb') as f:
+            audio = File(f, easy=True)
+            if audio is None:
+                return None
 
-        audio = File(file_path, easy=True)
-        if audio is None:
-            return None
+            file_metadata = {}
+            file_metadata['size'] = os.path.getsize(file_path)
+            file_metadata['mtime'] = os.path.getmtime(file_path)
 
-        # Normalize case by converting artist, title, and album to lowercase for case-insensitive comparison
-        file_metadata['artist'] = audio.get('artist', ['Unknown Artist'])[0].lower()
-        file_metadata['title'] = audio.get('title', ['Unknown Title'])[0].lower()
-        file_metadata['album'] = audio.get('album', ['Unknown Album'])[0].lower()
-        file_metadata['tracknumber'] = audio.get('tracknumber', [0])[0]
+            # Normalize case by converting artist, title, and album to lowercase for case-insensitive comparison
+            file_metadata['artist'] = audio.get('artist', ['Unknown Artist'])[0].lower()
+            file_metadata['title'] = audio.get('title', ['Unknown Title'])[0].lower()
+            file_metadata['album'] = audio.get('album', ['Unknown Album'])[0].lower()
+            file_metadata['tracknumber'] = audio.get('tracknumber', [0])[0]
 
-        file_extension = os.path.splitext(file_path)[1].lower()
-        file_metadata['format'] = file_extension.strip('.')
-        summary_stats['files_by_format'].setdefault(file_metadata['format'], 0)
-        summary_stats['files_by_format'][file_metadata['format']] += 1
+            file_extension = os.path.splitext(file_path)[1].lower()
+            file_metadata['format'] = file_extension.strip('.')
+            summary_stats['files_by_format'].setdefault(file_metadata['format'], 0)
+            summary_stats['files_by_format'][file_metadata['format']] += 1
 
-        # Update or add the cached metadata
-        file_cache.setdefault(file_path, {})
-        file_cache[file_path]['metadata'] = file_metadata
-        save_cache()
-        return file_metadata
+            # Update or add the cached metadata
+            file_cache.setdefault(file_path, {})
+            file_cache[file_path]['metadata'] = file_metadata
+            save_cache()
+            return file_metadata
     except Exception as e:
         print(f"Failed to get metadata for {file_path}: {e}")
         return None
@@ -117,7 +119,9 @@ def get_acoustid(file_path, revalidate=False):
         return file_cache[file_path]['acoustid']
 
     try:
-        duration, fingerprint = acoustid.fingerprint_file(file_path)
+        # Use context manager to ensure file is closed properly
+        with open(file_path, 'rb'):
+            duration, fingerprint = acoustid.fingerprint_file(file_path)
         response = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration, meta='recordings artists')
         if response['status'] != 'ok':
             error_message = response.get('error', {}).get('message', 'Unknown error')
@@ -155,6 +159,12 @@ def get_acoustid(file_path, revalidate=False):
         file_cache[file_path]['acoustid'] = rid
         save_cache()
         return rid
+    except acoustid.NoBackendError:
+        print("Chromaprint library/tool not found. Please install chromaprint or fpcalc.")
+        return None
+    except acoustid.FingerprintGenerationError:
+        print(f"Failed to generate fingerprint for {file_path}. The file may be corrupt or in an unsupported format.")
+        return None
     except Exception as e:
         print(f"AcoustID lookup failed for {file_path}: {e}")
         return None
@@ -241,7 +251,7 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, 
 
         # Update summary statistics
         summary_stats['total_files_to_remove'] += len(to_delete)
-        summary_stats['total_storage_to_save'] += sum(os.path.getsize(f[0]) for f in to_delete)
+        summary_stats['total_storage_to_save'] += sum(os.path.getsize(f[0]) for f in to_delete if os.path.exists(f[0]))
 
         if action == 'list':
             print(f"Best file: {best_file}")
@@ -277,7 +287,10 @@ def delete_duplicates(to_delete):
     """Deletes duplicate files."""
     for file_path, match_type in to_delete:
         print(f"Deleting {file_path} (Type: {match_type})")
-        os.remove(file_path)
+        try:
+            os.remove(file_path)
+        except OSError as e:
+            print(f"Error deleting file {file_path}: {e}")
 
 def display_summary():
     """Displays the summary statistics after processing."""
