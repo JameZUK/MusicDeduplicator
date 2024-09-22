@@ -201,20 +201,26 @@ def move_or_delete_folder(folder_path, move_dir=None, action='move', verbose=Fal
         summary_stats['folders_deleted'] += 1
 
 def is_folder_empty_of_media(path, media_extensions=('.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac')):
-    """Checks if a folder contains any media files. Returns True if no media files are found."""
-    for root, _, files in os.walk(path):
+    """Checks if a folder contains any media files. Returns True if no media files are found and no subfolders exist."""
+    for root, dirs, files in os.walk(path):
+        # Check if there are any media files
         for file in files:
             if file.lower().endswith(media_extensions):
-                return False  # The folder contains at least one media file
+                return False  # Media files exist
+
+        # If there are subfolders, we don't consider the folder empty
+        if dirs:
+            return False  # Subfolders exist
+
     return True
 
-def process_folders(path, action='move', move_dir=None, verbose=False):
-    """Processes folders based on the action (move or delete), deletes only if no media files remain."""
+def clean_empty_folders(path, action='move', move_dir=None, verbose=False):
+    """Cleans up and removes or moves folders that do not contain any media files and have no non-empty subfolders."""
     for root, dirs, _ in os.walk(path, topdown=False):
         for dir in dirs:
             dir_path = os.path.join(root, dir)
-            if action == 'delete' and is_folder_empty_of_media(dir_path):
-                move_or_delete_folder(dir_path, move_dir, action, verbose)
+            if is_folder_empty_of_media(dir_path):
+                move_or_delete_folder(dir_path, move_dir=move_dir, action=action, verbose=verbose)
 
 def display_summary():
     """Displays the summary statistics after processing."""
@@ -236,6 +242,7 @@ def main():
     parser.add_argument('-a', '--action', required=True, choices=['list', 'move', 'delete'], help="Action to take: list, move, or delete duplicates.")
     parser.add_argument('-m', '--move-dir', help="Directory to move duplicates to (required if action is 'move').")
     parser.add_argument('-r', '--remove-empty-folders', action='store_true', help="Remove or move empty folders after files are processed.")
+    parser.add_argument('-c', '--clean-folders', action='store_true', help="Clean up and remove or move folders that do not contain any media files.")
     parser.add_argument('-v', '--verbose', action='store_true', help="Enable verbose output with processing speed.")
 
     args = parser.parse_args()
@@ -246,20 +253,27 @@ def main():
 
     start_time = time.time()
 
-    duplicates = find_duplicates(args.path, verbose=args.verbose)
+    # If clean-folders option is selected, clean folders based on the action
+    if args.clean_folders:
+        print(f"Cleaning up empty folders by {args.action}...")
+        clean_empty_folders(args.path, action=args.action, move_dir=args.move_dir, verbose=args.verbose)
 
-    if duplicates:
-        print(f"Found {len(duplicates)} sets of duplicates.")
-        resolve_duplicates(duplicates, args.action, args.move_dir, base_dir=args.path, verbose=args.verbose)
     else:
-        print("No duplicates found.")
+        # Run the regular duplicate finding and processing logic
+        duplicates = find_duplicates(args.path, verbose=args.verbose)
 
-    save_cache()
+        if duplicates:
+            print(f"Found {len(duplicates)} sets of duplicates.")
+            resolve_duplicates(duplicates, args.action, args.move_dir, base_dir=args.path, verbose=args.verbose)
+        else:
+            print("No duplicates found.")
 
-    # Process folders (move or delete) if the option is selected
-    if args.remove_empty_folders:
-        print("\nChecking for empty folders...")
-        process_folders(args.path, action=args.action, move_dir=args.move_dir, verbose=args.verbose)
+        save_cache()
+
+        # Process folders (move or delete) if the option is selected
+        if args.remove_empty_folders:
+            print("\nChecking for empty folders...")
+            clean_empty_folders(args.path, action=args.action, move_dir=args.move_dir, verbose=args.verbose)
 
     total_time = time.time() - start_time
     print(f"\nCompleted in {total_time:.2f} seconds.")
