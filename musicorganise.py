@@ -136,7 +136,7 @@ def get_file_metadata(file_path, revalidate=False):
     file_cache[file_path] = {'metadata': file_metadata}
     save_cache()
     return file_metadata
-
+    
 def get_acoustid(file_path, revalidate=False):
     """Fetches or re-validates the AcoustID fingerprint and caches it."""
     if file_path in file_cache and 'acoustid' in file_cache[file_path] and not revalidate:
@@ -149,9 +149,10 @@ def get_acoustid(file_path, revalidate=False):
             file_cache[file_path]['acoustid'] = rid  # Cache AcoustID identifier
             save_cache()
             return rid
-    except Exception as e:
+    except Exception as e:  # Catch general exceptions instead of FingerprintError
         print(f"AcoustID lookup failed for {file_path}: {e}")
         return None
+
 
 def fuzzy_match(metadata1, metadata2):
     """Performs fuzzy matching between two metadata sets (title, artist, album) and returns the similarity percentage."""
