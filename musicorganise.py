@@ -151,8 +151,6 @@ def get_acoustid(file_path, revalidate=False):
         if artists:
             artist_name = artists[0].get('name', 'Unknown Artist')
 
-        print(f"AcoustID: {rid}, Title: {title}, Artist: {artist_name}")
-
         # Cache the AcoustID result
         file_cache.setdefault(file_path, {})
         file_cache[file_path]['acoustid'] = rid
