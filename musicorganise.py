@@ -199,7 +199,7 @@ def find_duplicates(directory, verbose=False):
     batch_size = 100  # Adjust batch size as needed
     for i in range(0, len(file_paths), batch_size):
         batch = file_paths[i:i+batch_size]
-        process_batch(batch, files_by_song, verbose)
+        process_batch(batch, files_by_song, verbose, start_time)
         save_cache()  # Save cache after each batch
         gc.collect()  # Force garbage collection
 
@@ -211,7 +211,7 @@ def find_duplicates(directory, verbose=False):
 
     return duplicates
 
-def process_batch(batch, files_by_song, verbose):
+def process_batch(batch, files_by_song, verbose, start_time):
     """Processes a batch of files."""
     for file_path in batch:
         # Use cached data if available, do not revalidate
