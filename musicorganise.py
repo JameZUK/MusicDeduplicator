@@ -55,15 +55,14 @@ def get_file_metadata(file_path):
     if audio is None:
         return None
 
-    # Extract metadata
-    file_metadata['artist'] = audio.get('artist', ['Unknown Artist'])[0]
-    file_metadata['title'] = audio.get('title', ['Unknown Title'])[0]
-    file_metadata['album'] = audio.get('album', ['Unknown Album'])[0]
+    # Normalize case by converting artist, title, and album to lowercase for case-insensitive comparison
+    file_metadata['artist'] = audio.get('artist', ['Unknown Artist'])[0].lower()
+    file_metadata['title'] = audio.get('title', ['Unknown Title'])[0].lower()
+    file_metadata['album'] = audio.get('album', ['Unknown Album'])[0].lower()
     file_metadata['tracknumber'] = audio.get('tracknumber', [0])[0]
     
     file_extension = os.path.splitext(file_path)[1].lower()
 
-    # Update file count by format
     if file_extension == '.flac':
         file_metadata['bitrate'] = FLAC(file_path).info.bitrate
         file_metadata['format'] = 'lossless'
@@ -176,16 +175,29 @@ def delete_duplicates(to_delete):
         print(f"Deleting {file_path}")
         os.remove(file_path)
 
+def is_folder_empty_of_media(path, media_extensions=('.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac')):
+    """Checks if a folder contains any media files. Returns True if no media files are found."""
+    for root, _, files in os.walk(path):
+        for file in files:
+            if file.lower().endswith(media_extensions):
+                return False  # The folder contains at least one media file
+    return True
+
 def remove_empty_folders(path, verbose=False):
-    """Removes empty folders after file deletion."""
+    """Removes folders that are empty of media files."""
     for root, dirs, _ in os.walk(path, topdown=False):
         for dir in dirs:
             dir_path = os.path.join(root, dir)
-            if not os.listdir(dir_path):  # Check if the folder is empty
-                os.rmdir(dir_path)
-                summary_stats['empty_folders_removed'] += 1
-                if verbose:
-                    print(f"Removed empty folder: {dir_path}")
+            if is_folder_empty_of_media(dir_path):  # Remove only if no media files are found
+                try:
+                    os.rmdir(dir_path)
+                    summary_stats['empty_folders_removed'] += 1
+                    if verbose:
+                        print(f"Removed empty folder: {dir_path}")
+                except OSError:
+                    # Catch any errors if the folder is not empty or if there are permission issues
+                    if verbose:
+                        print(f"Could not remove folder: {dir_path}")
 
 def display_summary():
     """Displays the summary statistics after processing."""
