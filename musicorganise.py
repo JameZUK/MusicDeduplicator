@@ -158,15 +158,25 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, verbose=False):
         elif action == 'delete':
             delete_duplicates(to_delete)
 
-def move_duplicates(to_delete, original_file, move_dir):
+def move_duplicates(to_delete, original_file, move_dir, base_dir):
     """Moves duplicate files to a new directory while keeping the folder structure intact."""
     for file_path in to_delete:
-        relative_path = os.path.relpath(file_path, start=os.path.dirname(original_file))
+        # Create the relative path based on the base directory (i.e., the root of the music folder being processed)
+        relative_path = os.path.relpath(file_path, start=base_dir)
+        
+        # Construct the full target path in the move directory
         target_path = os.path.join(move_dir, relative_path)
         target_dir_path = os.path.dirname(target_path)
+        
+        # Debugging output to check paths
+        print(f"Moving {file_path} to {target_path}")
+        print(f"Creating directory: {target_dir_path}")
+        
+        # Ensure the target directory exists
         if not os.path.exists(target_dir_path):
             os.makedirs(target_dir_path)
-        print(f"Moving {file_path} to {target_path}")
+        
+        # Move the file to the target directory
         shutil.move(file_path, target_path)
 
 def delete_duplicates(to_delete):
