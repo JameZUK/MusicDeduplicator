@@ -12,6 +12,7 @@ import gc  # For garbage collection
 from multiprocessing import Pool, cpu_count, Manager, get_context
 import threading
 import logging
+from tqdm import tqdm
 
 # Configuration file for storing API key, fuzzy threshold, and batch size
 CONFIG_FILE = 'config.json'
@@ -324,25 +325,37 @@ def process_acoustid(potential_duplicates, duplicates, verbose, start_time, use_
     acoustid_results = {}
     file_list = [file for sublist in potential_duplicates for file in sublist]
 
+    if verbose:
+        progress_bar = tqdm(total=len(file_list), desc="AcoustID Lookups", unit="file")
+
     if use_multiprocessing:
         num_processes = cpu_count()
         ctx = get_context('spawn')  # Use 'spawn' to start fresh processes
         with ctx.Pool(processes=num_processes) as pool:
-            results = pool.map(process_file_acoustid, file_list)
+            # Use imap_unordered to process results as they become available
+            for result in pool.imap_unordered(process_file_acoustid, file_list):
+                if result:
+                    rid, file_path = result
+                    acoustid_results.setdefault(rid, []).append(file_path)
+                summary_stats['total_acoustid_lookups'] += 1
+
+                # Update progress bar
+                if verbose:
+                    progress_bar.update(1)
     else:
         # Single-threaded processing for debugging
-        results = map(process_file_acoustid, file_list)
+        for result in map(process_file_acoustid, file_list):
+            if result:
+                rid, file_path = result
+                acoustid_results.setdefault(rid, []).append(file_path)
+            summary_stats['total_acoustid_lookups'] += 1
 
-    for result in results:
-        if result:
-            rid, file_path = result
-            acoustid_results.setdefault(rid, []).append(file_path)
-        summary_stats['total_acoustid_lookups'] += 1
+            # Update progress bar
+            if verbose:
+                progress_bar.update(1)
 
-        # Verbose output
-        if verbose and summary_stats['total_acoustid_lookups'] % 50 == 0:
-            elapsed_time = time.time() - start_time
-            logging.info(f"Performed {summary_stats['total_acoustid_lookups']} AcoustID lookups in {elapsed_time:.2f} seconds")
+    if verbose:
+        progress_bar.close()
 
     # Identify duplicates based on AcoustID
     for file_list in acoustid_results.values():
