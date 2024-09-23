@@ -2,6 +2,7 @@ import os
 import json
 import shutil
 import argparse
+import subprocess
 import acoustid
 from fuzzywuzzy import fuzz
 from mutagen import File
@@ -87,32 +88,29 @@ def get_file_metadata(file_path, revalidate=False):
         return file_cache[file_path]['metadata']
 
     try:
-        # Use context manager to ensure file is closed properly
-        with open(file_path, 'rb') as f:
-            audio = File(f, easy=True)
-            if audio is None:
-                return None
+        audio = File(file_path, easy=True)
+        if audio is None:
+            return None
 
-            file_metadata = {}
-            file_metadata['size'] = os.path.getsize(file_path)
-            file_metadata['mtime'] = os.path.getmtime(file_path)
+        file_metadata = {}
+        file_metadata['size'] = os.path.getsize(file_path)
+        file_metadata['mtime'] = os.path.getmtime(file_path)
 
-            # Normalize case by converting artist, title, and album to lowercase for case-insensitive comparison
-            file_metadata['artist'] = audio.get('artist', ['Unknown Artist'])[0].lower()
-            file_metadata['title'] = audio.get('title', ['Unknown Title'])[0].lower()
-            file_metadata['album'] = audio.get('album', ['Unknown Album'])[0].lower()
-            file_metadata['tracknumber'] = audio.get('tracknumber', [0])[0]
+        # Normalize case by converting artist, title, and album to lowercase
+        file_metadata['artist'] = audio.get('artist', ['Unknown Artist'])[0].lower()
+        file_metadata['title'] = audio.get('title', ['Unknown Title'])[0].lower()
+        file_metadata['album'] = audio.get('album', ['Unknown Album'])[0].lower()
+        file_metadata['tracknumber'] = audio.get('tracknumber', [0])[0]
 
-            file_extension = os.path.splitext(file_path)[1].lower()
-            file_metadata['format'] = file_extension.strip('.')
-            summary_stats['files_by_format'].setdefault(file_metadata['format'], 0)
-            summary_stats['files_by_format'][file_metadata['format']] += 1
+        file_extension = os.path.splitext(file_path)[1].lower()
+        file_metadata['format'] = file_extension.strip('.')
+        summary_stats['files_by_format'].setdefault(file_metadata['format'], 0)
+        summary_stats['files_by_format'][file_metadata['format']] += 1
 
-            # Update or add the cached metadata
-            file_cache.setdefault(file_path, {})
-            file_cache[file_path]['metadata'] = file_metadata
-            # Removed save_cache() call
-            return file_metadata
+        # Update or add the cached metadata
+        file_cache.setdefault(file_path, {})
+        file_cache[file_path]['metadata'] = file_metadata
+        return file_metadata
     except Exception as e:
         print(f"Failed to get metadata for {file_path}: {e}")
         return None
@@ -123,8 +121,16 @@ def get_acoustid(file_path, revalidate=False):
         return file_cache[file_path]['acoustid']
 
     try:
-        # No need to open the file; acoustid.fingerprint_file handles it
-        duration, fingerprint = acoustid.fingerprint_file(file_path)
+        # Use fpcalc via subprocess
+        result = subprocess.run(['fpcalc', '-json', file_path], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"fpcalc failed for {file_path}: {result.stderr.strip()}")
+            return None
+
+        fingerprint_data = json.loads(result.stdout)
+        duration = fingerprint_data['duration']
+        fingerprint = fingerprint_data['fingerprint']
+
         response = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration, meta='recordings artists')
         if response['status'] != 'ok':
             error_message = response.get('error', {}).get('message', 'Unknown error')
@@ -133,7 +139,6 @@ def get_acoustid(file_path, revalidate=False):
 
         results = response.get('results', [])
         if not results:
-            # print(f"No AcoustID results for {file_path}")
             return None
 
         # Get the best match (highest score)
@@ -142,30 +147,15 @@ def get_acoustid(file_path, revalidate=False):
         # Extract recording information
         recordings = best_result.get('recordings', [])
         if not recordings:
-            # print(f"No recordings found for {file_path}")
             return None
 
         recording = recordings[0]  # Use the first recording
         rid = recording.get('id')
-        title = recording.get('title', 'Unknown Title')
-
-        # Extract the artist if available
-        artists = recording.get('artists', [])
-        artist_name = 'Unknown Artist'
-        if artists:
-            artist_name = artists[0].get('name', 'Unknown Artist')
 
         # Cache the AcoustID result
         file_cache.setdefault(file_path, {})
         file_cache[file_path]['acoustid'] = rid
-        # Removed save_cache() call
         return rid
-    except acoustid.NoBackendError:
-        print("Chromaprint library/tool not found. Please install chromaprint or fpcalc.")
-        return None
-    except acoustid.FingerprintGenerationError:
-        print(f"Failed to generate fingerprint for {file_path}. The file may be corrupt or in an unsupported format.")
-        return None
     except Exception as e:
         print(f"AcoustID lookup failed for {file_path}: {e}")
         return None
@@ -285,10 +275,6 @@ def move_duplicates(to_delete, original_file, move_dir, base_dir):
         # Construct the full target path in the move directory
         target_path = os.path.join(move_dir, relative_path)
         target_dir_path = os.path.dirname(target_path)
-
-        # Debugging output to check paths
-        print(f"Moving {file_path} to {target_path} (Type: {match_type})")
-        # print(f"Creating directory: {target_dir_path}")
 
         # Ensure the target directory exists
         if not os.path.exists(target_dir_path):
