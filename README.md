@@ -108,14 +108,14 @@ These settings can be modified directly in config.json or will be prompted durin
 
 Example config.json:
 
-json
+```json
 
 {
     "acoustid_api_key": "YOUR_API_KEY_HERE",
     "fuzzy_threshold": 90,
     "batch_size": 1000
 }
-
+```
 Usage
 Running the Script
 
