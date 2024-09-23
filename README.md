@@ -29,7 +29,7 @@ The **Music Deduplication Tool** is a Python script designed to help you manage 
 Install the required Python libraries using pip:
 
 ```bash
-pip install acoustid mutagen fuzzywuzzy[speedup] tqdm
+pip install acoustid mutagen fuzzywuzzy[speedup] tqdm pyacoustid
 ```
 # Music Deduplication Tool
 
