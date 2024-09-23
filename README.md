@@ -31,6 +31,39 @@ Install the required Python libraries using pip:
 ```bash
 pip install acoustid mutagen fuzzywuzzy[speedup] tqdm
 ```
+# Music Deduplication Tool
+
+## Overview
+
+The **Music Deduplication Tool** is a Python script designed to help you manage and clean up your music library by identifying and handling duplicate audio files. It scans your music directories, detects duplicates using metadata analysis and audio fingerprinting with AcoustID, and allows you to either list, move, or delete the duplicates based on your preference.
+
+## Features
+
+- **Metadata Analysis with Fuzzy Matching**: Quickly identifies potential duplicates by comparing metadata (artist, title, album) using fuzzy string matching.
+- **Audio Fingerprinting with AcoustID**: Utilizes AcoustID and the Chromaprint library to accurately identify audio duplicates, even if file metadata differs or is missing.
+- **Batch Processing**: Processes files in batches to optimize resource usage and prevent system overload.
+- **Multiprocessing Support**: Leverages multiple CPU cores to speed up processing tasks.
+- **Progress Bar**: Provides a real-time progress bar for AcoustID lookups using `tqdm`.
+- **Caching Mechanism**: Caches file metadata and AcoustID fingerprints to improve performance on subsequent runs.
+- **Customizable Actions**: Supports listing, moving, or deleting duplicates based on user selection.
+- **Logging Functionality**: Detailed logging with configurable log levels, stored in `music_deduplicate.log`.
+- **Configurable Parameters**: Batch size, fuzzy match threshold, and other settings are configurable via `config.json`.
+- **Verbose Output**: Provides detailed progress information when enabled.
+
+## Installation
+
+### Prerequisites
+
+- **Python 3.6 or higher**
+- **pip** (Python package installer)
+
+### Required Python Libraries
+
+Install the required Python libraries using pip:
+
+```bash
+pip install acoustid mutagen fuzzywuzzy[speedup] tqdm
+```
     acoustid: For audio fingerprinting and AcoustID API interaction.
     mutagen: For reading and writing audio metadata.
     fuzzywuzzy: For fuzzy string matching in metadata comparison.
@@ -42,20 +75,20 @@ System Dependencies
 Install the following system dependencies:
 On Debian/Ubuntu-based systems:
 
-bash
+```bash
 
 sudo apt-get update
 sudo apt-get install ffmpeg libchromaprint-tools
-
+```
     ffmpeg: Provides audio decoding capabilities required by some audio processing libraries.
     libchromaprint-tools: Provides fpcalc, required by AcoustID for fingerprinting.
 
 On macOS using Homebrew:
 
-bash
+```bash
 
 brew install ffmpeg chromaprint
-
+```
 Configuration
 Obtain an AcoustID API Key
 
@@ -88,10 +121,10 @@ Running the Script
 
 Basic command structure:
 
-bash
+```bash
 
 python3 music_deduplicate.py --path "/path/to/music" --action ACTION [options]
-
+```
 Command-Line Options
 
     -p, --path: (Required) Path to the music directory to scan.
@@ -107,22 +140,22 @@ Command-Line Options
 Examples
 List Duplicates with Progress Bar
 
-bash
+```bash
 
 python3 music_deduplicate.py --path "/media/music/Organised" --action list --verbose
-
+```
 Move Duplicates to a Directory
 
-bash
+```bash
 
 python3 music_deduplicate.py --path "/media/music/Organised" --action move --move-dir "/media/music/Duplicates" --verbose
-
+```
 Delete Duplicates with Detailed Logging
 
-bash
+```bash
 
 python3 music_deduplicate.py --path "/media/music/Organised" --action delete --verbose --log-level DEBUG
-
+```
 Adjusting Batch Size
 
 You can adjust the batch size by modifying the batch_size parameter in the config.json file.
@@ -137,10 +170,10 @@ Disabling Multiprocessing
 
 If you encounter issues with multiprocessing or are debugging, you can disable it:
 
-bash
+```bash
 
 python3 music_deduplicate.py --path "/media/music/Organised" --action list --no-multiprocessing --verbose
-
+```
 How It Works
 
     File Scanning: The script recursively scans the specified music directory for supported audio file formats (.mp3, .flac, .ogg, .wav, .m4a, .aac).
@@ -168,10 +201,10 @@ Logging
 
 Example command to set log level to DEBUG:
 
-bash
+```bash
 
 python3 music_deduplicate.py --path "/media/music/Organised" --action list --log-level DEBUG
-
+```
 Limitations and Considerations
 
     AcoustID API Rate Limits: Be mindful of AcoustID API usage limits when processing large music libraries.
