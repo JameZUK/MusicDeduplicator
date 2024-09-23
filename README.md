@@ -160,12 +160,12 @@ Adjusting Batch Size
 
 You can adjust the batch size by modifying the batch_size parameter in the config.json file.
 
-json
+```json
 
 {
     "batch_size": 500
 }
-
+```
 Disabling Multiprocessing
 
 If you encounter issues with multiprocessing or are debugging, you can disable it:
