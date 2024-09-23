@@ -8,7 +8,7 @@ from fuzzywuzzy import fuzz
 from mutagen import File
 import time
 import gc  # For garbage collection
-from multiprocessing import Pool, cpu_count, Manager
+from multiprocessing import Pool, cpu_count, get_context
 import threading
 import logging
 
@@ -18,12 +18,12 @@ CONFIG_FILE = 'config.json'
 # Load or initialize configuration
 def load_config():
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
 
 def save_config(config):
-    with open(CONFIG_FILE, 'w') as f:
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
 
 # Load configuration parameters
@@ -62,7 +62,7 @@ def setup_logging(log_level):
     logger.setLevel(log_level)
 
     # Create file handler which logs even debug messages
-    fh = logging.FileHandler('music_deduplicate.log')
+    fh = logging.FileHandler('music_deduplicate.log', encoding='utf-8')
     fh.setLevel(logging.DEBUG)
 
     # Create console handler with a higher log level
@@ -83,20 +83,20 @@ CACHE_FILE = 'file_cache.json'
 file_cache = {}
 
 # Summary statistics
-summary_stats = Manager().dict({
+summary_stats = {
     'total_files_processed': 0,
     'total_duplicates_found': 0,
     'total_files_to_remove': 0,
     'total_storage_to_save': 0,
-    'files_by_format': Manager().dict(),
+    'files_by_format': {},
     'total_acoustid_lookups': 0
-})
+}
 
 # Load cached data if it exists
 def load_cache():
     try:
         if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, 'r') as f:
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except (json.JSONDecodeError, IOError) as e:
         logging.warning(f"Cache file is corrupt or unreadable, recreating it: {e}")
@@ -107,7 +107,7 @@ file_cache = load_cache()
 # Save cache to file for persistence
 def save_cache():
     try:
-        with open(CACHE_FILE, 'w') as f:
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
             json.dump(file_cache, f)
     except Exception as e:
         logging.error(f"Error saving cache: {e}")
@@ -128,12 +128,14 @@ def validate_cached_data(file_path):
 
 def get_file_metadata(file_path, revalidate=False):
     """Fetches or re-validates metadata of the music file using Mutagen and caches it for performance."""
+    file_path = os.fsdecode(file_path)
     if not revalidate and file_path in file_cache and 'metadata' in file_cache[file_path]:
         return file_cache[file_path]['metadata']
 
     try:
         audio = File(file_path, easy=True)
         if audio is None:
+            logging.warning(f"Unsupported file format or corrupted file: {file_path}")
             return None
 
         file_metadata = {}
@@ -155,12 +157,16 @@ def get_file_metadata(file_path, revalidate=False):
         file_cache.setdefault(file_path, {})
         file_cache[file_path]['metadata'] = file_metadata
         return file_metadata
+    except FileNotFoundError as e:
+        logging.error(f"File not found: {file_path} - {e}")
+        return None
     except Exception as e:
         logging.error(f"Failed to get metadata for {file_path}: {e}")
         return None
 
 def get_acoustid(file_path, revalidate=False):
     """Fetches or re-validates the AcoustID fingerprint and caches it for performance."""
+    file_path = os.fsdecode(file_path)
     if not revalidate and file_path in file_cache and 'acoustid' in file_cache[file_path]:
         return file_cache[file_path]['acoustid']
 
@@ -200,6 +206,9 @@ def get_acoustid(file_path, revalidate=False):
         file_cache.setdefault(file_path, {})
         file_cache[file_path]['acoustid'] = rid
         return rid
+    except FileNotFoundError as e:
+        logging.error(f"File not found: {file_path} - {e}")
+        return None
     except Exception as e:
         logging.error(f"AcoustID lookup failed for {file_path}: {e}")
         return None
@@ -221,9 +230,8 @@ def fuzzy_match(metadata1, metadata2):
 
 def find_duplicates(directory, verbose=False):
     """Recursively scans directory for music files and identifies duplicates based on metadata matching."""
-    manager = Manager()
-    files_by_metadata = manager.dict()
-    duplicates = manager.list()
+    files_by_metadata = {}
+    duplicates = []
     start_time = time.time()
     file_paths = []
 
@@ -231,13 +239,17 @@ def find_duplicates(directory, verbose=False):
     for root, _, files in os.walk(directory):
         for file in files:
             file_path = os.path.join(root, file)
+            file_path = os.fsdecode(file_path)
             if not file.lower().endswith(('.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac')):
+                continue
+            if not os.path.isfile(file_path):
+                logging.warning(f"File does not exist or is not a regular file: {file_path}")
                 continue
             file_paths.append(file_path)
 
     num_processes = cpu_count()
 
-    with Pool(processes=num_processes) as pool:
+    with get_context("spawn").Pool(processes=num_processes) as pool:
         for i in range(0, len(file_paths), BATCH_SIZE):
             batch = file_paths[i:i+BATCH_SIZE]
             results = pool.map(process_file_metadata, batch)
@@ -273,22 +285,25 @@ def find_duplicates(directory, verbose=False):
 
 def process_file_metadata(file_path):
     """Processes a file to extract metadata for duplicate detection."""
-    metadata = get_file_metadata(file_path)
-    if not metadata:
-        return None
+    try:
+        metadata = get_file_metadata(file_path)
+        if not metadata:
+            return None
 
-    # Use metadata key
-    metadata_key = (metadata['artist'], metadata['title'], metadata['album'])
-    return metadata_key, file_path
+        # Use metadata key
+        metadata_key = (metadata['artist'], metadata['title'], metadata['album'])
+        return metadata_key, file_path
+    except Exception as e:
+        logging.error(f"Error processing file metadata for {file_path}: {e}")
+        return None
 
 def process_acoustid(potential_duplicates, duplicates, verbose, start_time):
     """Processes potential duplicates using AcoustID fingerprinting."""
-    manager = Manager()
-    acoustid_results = manager.dict()
+    acoustid_results = {}
     file_list = [file for sublist in potential_duplicates for file in sublist]
     num_processes = cpu_count()
 
-    with Pool(processes=num_processes) as pool:
+    with get_context("spawn").Pool(processes=num_processes) as pool:
         results = pool.map(process_file_acoustid, file_list)
         for result in results:
             if result:
@@ -308,10 +323,14 @@ def process_acoustid(potential_duplicates, duplicates, verbose, start_time):
 
 def process_file_acoustid(file_path):
     """Processes a file to obtain its AcoustID."""
-    rid = get_acoustid(file_path)
-    if rid:
-        return rid, file_path
-    return None
+    try:
+        rid = get_acoustid(file_path)
+        if rid:
+            return rid, file_path
+        return None
+    except Exception as e:
+        logging.error(f"Error processing AcoustID for {file_path}: {e}")
+        return None
 
 def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, verbose=False):
     """Resolves duplicates by either listing, moving, or deleting them."""
@@ -350,28 +369,31 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, 
 def move_duplicates(to_delete, original_file, move_dir, base_dir):
     """Moves duplicate files to a new directory while keeping the folder structure intact."""
     for file_path in to_delete:
-        # Create the relative path based on the base directory
-        relative_path = os.path.relpath(file_path, start=base_dir)
+        try:
+            # Create the relative path based on the base directory
+            relative_path = os.path.relpath(file_path, start=base_dir)
 
-        # Construct the full target path in the move directory
-        target_path = os.path.join(move_dir, relative_path)
-        target_dir_path = os.path.dirname(target_path)
+            # Construct the full target path in the move directory
+            target_path = os.path.join(move_dir, relative_path)
+            target_dir_path = os.path.dirname(target_path)
 
-        # Ensure the target directory exists
-        if not os.path.exists(target_dir_path):
-            os.makedirs(target_dir_path)
+            # Ensure the target directory exists
+            if not os.path.exists(target_dir_path):
+                os.makedirs(target_dir_path)
 
-        # Move the file to the target directory
-        shutil.move(file_path, target_path)
-        logging.info(f"Moved {file_path} to {target_path}")
+            # Move the file to the target directory
+            shutil.move(file_path, target_path)
+            logging.info(f"Moved {file_path} to {target_path}")
+        except Exception as e:
+            logging.error(f"Error moving file {file_path} to {target_path}: {e}")
 
 def delete_duplicates(to_delete):
     """Deletes duplicate files."""
     for file_path in to_delete:
-        logging.info(f"Deleting {file_path}")
         try:
             os.remove(file_path)
-        except OSError as e:
+            logging.info(f"Deleted {file_path}")
+        except Exception as e:
             logging.error(f"Error deleting file {file_path}: {e}")
 
 def display_summary():
@@ -386,6 +408,12 @@ def display_summary():
         logging.info(f"  {format.upper()}: {count} files")
 
 def main():
+    # Ensure multiprocessing uses 'spawn' start method
+    try:
+        multiprocessing.set_start_method('spawn')
+    except RuntimeError:
+        pass  # Start method has already been set
+
     parser = argparse.ArgumentParser(description="Music collection deduplication script.")
 
     parser.add_argument('-p', '--path', required=True, help="Path to the music directory to scan.")
