@@ -8,6 +8,8 @@ from fuzzywuzzy import fuzz
 from mutagen import File
 import time
 import gc  # For garbage collection
+from multiprocessing import Pool, cpu_count, Manager
+import threading
 
 # Configuration file for storing API key and fuzzy threshold
 CONFIG_FILE = 'config.json'
@@ -48,13 +50,14 @@ CACHE_FILE = 'file_cache.json'
 file_cache = {}
 
 # Summary statistics
-summary_stats = {
+summary_stats = Manager().dict({
     'total_files_processed': 0,
     'total_duplicates_found': 0,
     'total_files_to_remove': 0,
     'total_storage_to_save': 0,
-    'files_by_format': {}
-}
+    'files_by_format': Manager().dict(),
+    'total_acoustid_lookups': 0
+})
 
 # Load cached data if it exists
 def load_cache():
@@ -77,9 +80,17 @@ def save_cache():
         print(f"Error saving cache: {e}")
 
 def validate_cached_data(file_path):
-    """Re-validates the cached metadata and AcoustID fingerprint."""
-    metadata = get_file_metadata(file_path, revalidate=True)
-    acoustid_rid = get_acoustid(file_path, revalidate=True)
+    """Re-validates cached data only if the file has changed."""
+    file_mtime = os.path.getmtime(file_path)
+    cached_mtime = file_cache.get(file_path, {}).get('metadata', {}).get('mtime')
+    if cached_mtime == file_mtime:
+        # No changes, use cached data
+        metadata = file_cache[file_path]['metadata']
+        acoustid_rid = file_cache[file_path].get('acoustid')
+    else:
+        # File has changed, re-validate
+        metadata = get_file_metadata(file_path, revalidate=True)
+        acoustid_rid = get_acoustid(file_path, revalidate=True)
     return metadata, acoustid_rid
 
 def get_file_metadata(file_path, revalidate=False):
@@ -96,7 +107,7 @@ def get_file_metadata(file_path, revalidate=False):
         file_metadata['size'] = os.path.getsize(file_path)
         file_metadata['mtime'] = os.path.getmtime(file_path)
 
-        # Normalize case by converting artist, title, and album to lowercase
+        # Normalize case by converting artist, title, and album to lowercase for case-insensitive comparison
         file_metadata['artist'] = audio.get('artist', ['Unknown Artist'])[0].lower()
         file_metadata['title'] = audio.get('title', ['Unknown Title'])[0].lower()
         file_metadata['album'] = audio.get('album', ['Unknown Album'])[0].lower()
@@ -124,17 +135,17 @@ def get_acoustid(file_path, revalidate=False):
         # Use fpcalc via subprocess
         result = subprocess.run(['fpcalc', '-json', file_path], capture_output=True, text=True)
         if result.returncode != 0:
-            print(f"fpcalc failed for {file_path}: {result.stderr.strip()}")
+            # print(f"fpcalc failed for {file_path}: {result.stderr.strip()}")
             return None
 
         fingerprint_data = json.loads(result.stdout)
         duration = fingerprint_data['duration']
         fingerprint = fingerprint_data['fingerprint']
 
-        response = acoustid.lookup(ACOUSTID_API_KEY, fingerprint, duration, meta='recordings artists')
+        response = acoustid_lookup(ACOUSTID_API_KEY, fingerprint, duration)
         if response['status'] != 'ok':
             error_message = response.get('error', {}).get('message', 'Unknown error')
-            print(f"AcoustID lookup failed for {file_path}: {error_message}")
+            # print(f"AcoustID lookup failed for {file_path}: {error_message}")
             return None
 
         results = response.get('results', [])
@@ -157,8 +168,12 @@ def get_acoustid(file_path, revalidate=False):
         file_cache[file_path]['acoustid'] = rid
         return rid
     except Exception as e:
-        print(f"AcoustID lookup failed for {file_path}: {e}")
+        # print(f"AcoustID lookup failed for {file_path}: {e}")
         return None
+
+def acoustid_lookup(api_key, fingerprint, duration):
+    """Performs AcoustID lookup synchronously."""
+    return acoustid.lookup(api_key, fingerprint, duration, meta='recordings artists')
 
 def fuzzy_match(metadata1, metadata2):
     """Performs fuzzy matching between two metadata sets (title, artist, album) and returns the similarity percentage."""
@@ -172,9 +187,10 @@ def fuzzy_match(metadata1, metadata2):
     return avg_match
 
 def find_duplicates(directory, verbose=False):
-    """Recursively scans directory for music files and identifies duplicates based on fuzzy metadata matching and AcoustID."""
-    files_by_song = {}
-    duplicates = []
+    """Recursively scans directory for music files and identifies duplicates based on metadata matching."""
+    manager = Manager()
+    files_by_metadata = manager.dict()
+    duplicates = manager.list()
     start_time = time.time()
     file_paths = []
 
@@ -186,51 +202,84 @@ def find_duplicates(directory, verbose=False):
                 continue
             file_paths.append(file_path)
 
-    batch_size = 100  # Adjust batch size as needed
-    for i in range(0, len(file_paths), batch_size):
-        batch = file_paths[i:i+batch_size]
-        process_batch(batch, files_by_song, verbose, start_time)
-        save_cache()  # Save cache after each batch
-        gc.collect()  # Force garbage collection
+    batch_size = 1000  # Adjust batch size as needed
+    num_processes = cpu_count()
 
-    # Identify duplicates after processing all batches
-    for file_list in files_by_song.values():
+    with Pool(processes=num_processes) as pool:
+        for i in range(0, len(file_paths), batch_size):
+            batch = file_paths[i:i+batch_size]
+            results = pool.map(process_file_metadata, batch)
+            for result in results:
+                if result:
+                    key, file_path = result
+                    files_by_metadata.setdefault(key, []).append(file_path)
+            summary_stats['total_files_processed'] += len(batch)
+
+            # Verbose output
+            if verbose:
+                elapsed_time = time.time() - start_time
+                files_per_sec = summary_stats['total_files_processed'] / elapsed_time
+                print(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
+
+            save_cache()  # Save cache after each batch
+            gc.collect()  # Force garbage collection
+
+    # Identify potential duplicates based on metadata
+    potential_duplicates = []
+    for file_list in files_by_metadata.values():
         if len(file_list) > 1:
-            duplicates.append(file_list)
-            summary_stats['total_duplicates_found'] += 1
+            potential_duplicates.append(file_list)
+
+    # Perform AcoustID fingerprinting on potential duplicates
+    if potential_duplicates:
+        process_acoustid(potential_duplicates, duplicates, verbose, start_time)
+
+    # Update summary statistics
+    summary_stats['total_duplicates_found'] = len(duplicates)
 
     return duplicates
 
-def process_batch(batch, files_by_song, verbose, start_time):
-    """Processes a batch of files."""
-    for file_path in batch:
-        # Use cached data if available, do not revalidate
-        metadata = get_file_metadata(file_path)
-        acoustid_rid = get_acoustid(file_path)
-        if not metadata:
-            continue
+def process_file_metadata(file_path):
+    """Processes a file to extract metadata for duplicate detection."""
+    metadata = get_file_metadata(file_path)
+    if not metadata:
+        return None
 
-        # Use AcoustID for exact matching when available, fall back on fuzzy matching if no AcoustID is found
-        if acoustid_rid:
-            key = acoustid_rid
-            match_type = 'AcoustID'
-        else:
-            key = (metadata['artist'], metadata['title'], metadata['album'])
-            match_type = 'Fuzzy'
+    # Use metadata key
+    metadata_key = (metadata['artist'], metadata['title'], metadata['album'])
+    return metadata_key, file_path
 
-        # Find potential duplicates by key
-        if key in files_by_song:
-            files_by_song[key].append((file_path, match_type))
-        else:
-            files_by_song[key] = [(file_path, match_type)]
+def process_acoustid(potential_duplicates, duplicates, verbose, start_time):
+    """Processes potential duplicates using AcoustID fingerprinting."""
+    manager = Manager()
+    acoustid_results = manager.dict()
+    file_list = [file for sublist in potential_duplicates for file in sublist]
+    num_processes = cpu_count()
 
-        summary_stats['total_files_processed'] += 1
+    with Pool(processes=num_processes) as pool:
+        results = pool.map(process_file_acoustid, file_list)
+        for result in results:
+            if result:
+                rid, file_path = result
+                acoustid_results.setdefault(rid, []).append(file_path)
+            summary_stats['total_acoustid_lookups'] += 1
 
-        # Verbose output
-        if verbose and summary_stats['total_files_processed'] % 100 == 0:
-            elapsed_time = time.time() - start_time
-            files_per_sec = summary_stats['total_files_processed'] / elapsed_time
-            print(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
+            # Verbose output
+            if verbose and summary_stats['total_acoustid_lookups'] % 50 == 0:
+                elapsed_time = time.time() - start_time
+                print(f"Performed {summary_stats['total_acoustid_lookups']} AcoustID lookups in {elapsed_time:.2f} seconds")
+
+    # Identify duplicates based on AcoustID
+    for file_list in acoustid_results.values():
+        if len(file_list) > 1:
+            duplicates.append(file_list)
+
+def process_file_acoustid(file_path):
+    """Processes a file to obtain its AcoustID."""
+    rid = get_acoustid(file_path)
+    if rid:
+        return rid, file_path
+    return None
 
 def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, verbose=False):
     """Resolves duplicates by either listing, moving, or deleting them."""
@@ -240,27 +289,27 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, 
         to_delete = []
 
         # Re-validate before taking action
-        for file_path, match_type in duplicate_set:
+        for file_path in duplicate_set:
             metadata, _ = validate_cached_data(file_path)
             if not metadata:
                 continue
 
             if best_file is None or (metadata['format'] == 'flac' and (best_metadata is None or metadata['size'] > best_metadata['size'])):
                 if best_file:
-                    to_delete.append((best_file, match_type))
+                    to_delete.append(best_file)
                 best_file = file_path
                 best_metadata = metadata
             else:
-                to_delete.append((file_path, match_type))
+                to_delete.append(file_path)
 
         # Update summary statistics
         summary_stats['total_files_to_remove'] += len(to_delete)
-        summary_stats['total_storage_to_save'] += sum(os.path.getsize(f[0]) for f in to_delete if os.path.exists(f[0]))
+        summary_stats['total_storage_to_save'] += sum(os.path.getsize(f) for f in to_delete if os.path.exists(f))
 
         if action == 'list':
             print(f"Best file: {best_file}")
-            for file, match_type in to_delete:
-                print(f"To delete: {file} (Type: {match_type})")
+            for file in to_delete:
+                print(f"To delete: {file}")
         elif action == 'move' and move_dir:
             move_duplicates(to_delete, best_file, move_dir, base_dir)
         elif action == 'delete':
@@ -268,7 +317,7 @@ def resolve_duplicates(duplicates, action='list', move_dir=None, base_dir=None, 
 
 def move_duplicates(to_delete, original_file, move_dir, base_dir):
     """Moves duplicate files to a new directory while keeping the folder structure intact."""
-    for file_path, match_type in to_delete:
+    for file_path in to_delete:
         # Create the relative path based on the base directory
         relative_path = os.path.relpath(file_path, start=base_dir)
 
@@ -285,8 +334,8 @@ def move_duplicates(to_delete, original_file, move_dir, base_dir):
 
 def delete_duplicates(to_delete):
     """Deletes duplicate files."""
-    for file_path, match_type in to_delete:
-        print(f"Deleting {file_path} (Type: {match_type})")
+    for file_path in to_delete:
+        print(f"Deleting {file_path}")
         try:
             os.remove(file_path)
         except OSError as e:
