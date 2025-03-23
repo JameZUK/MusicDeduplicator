@@ -364,7 +364,7 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True):
 
     # Identify potential duplicates based on metadata (whole directories)
     for file_list in files_by_metadata.values():
-        if len(file_list) > 1
+        if len(file_list) > 1:
             # Add the entire directory to potential duplicates if any files within it are potential duplicates
             potential_duplicate_dirs.add(os.path.dirname(file_list[0]))
 
