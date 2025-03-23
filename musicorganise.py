@@ -8,18 +8,19 @@ import acoustid
 from fuzzywuzzy import fuzz
 from mutagen import File
 import time
-import gc  # For garbage collection
-from multiprocessing import Pool, cpu_count, Manager, get_context
+import gc
+from multiprocessing import Pool, cpu_count, get_context
 import threading
 import logging
 from tqdm import tqdm
 from ratelimit import limits, sleep_and_retry
+import sqlite3  # Import sqlite3
 
-# Configuration file for storing API key, fuzzy threshold, and batch size
+# Configuration file and cache database file
 CONFIG_FILE = 'config.json'
-CACHE_FILE = 'file_cache.json'
+CACHE_DB = 'file_cache.db'  # Use a SQLite database for the cache
 
-# Load or initialize configuration
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -102,171 +103,11 @@ def check_fpcalc():
     except (FileNotFoundError, subprocess.CalledProcessError):
         return False
 
-# Summary statistics
-summary_stats = {
-    'total_files_processed': 0,
-    'total_duplicates_found': 0,
-    'total_files_to_remove': 0,
-    'total_storage_to_save': 0,
-    'files_by_format': {},
-    'total_acoustid_lookups': 0
-}
-
-# Load cached data if it exists
-def load_cache():
-    try:
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except (json.JSONDecodeError, IOError) as e:
-        logging.warning(f"Cache file is corrupt or unreadable, recreating it: {e}")
-    return {}
-
-# Initialize file_cache using Manager.dict() for multiprocessing
-manager = Manager()
-file_cache = manager.dict(load_cache())  # Use a managed dictionary
-cache_lock = manager.Lock()  # Create a lock
-
-# Save cache to file for persistence
-def save_cache(cache_lock=None):
-    if cache_lock is None:
-        cache_lock = threading.Lock() #dummy
-    temp_cache_file = CACHE_FILE + ".tmp"
-    try:
-        with cache_lock:
-          with open(temp_cache_file, 'w', encoding='utf-8') as f:
-              json.dump(dict(file_cache), f)
-        shutil.move(temp_cache_file, CACHE_FILE)
-    except Exception as e:
-        logging.error(f"Error saving cache: {e}")
-
-def validate_cached_data(file_path, cache_lock):
-    """Re-validates cached data only if the file has changed."""
-    with cache_lock:
-        file_mtime = os.path.getmtime(file_path)
-        cached_mtime = file_cache.get(file_path, {}).get('metadata', {}).get('mtime')
-
-    if cached_mtime == file_mtime:
-        # No changes, use cached data
-        with cache_lock:
-            metadata = file_cache[file_path]['metadata']
-            acoustid_rid = file_cache[file_path].get('acoustid')
-    else:
-        # File has changed, re-validate
-        metadata = get_file_metadata(file_path, revalidate=True, cache_lock=cache_lock)
-        acoustid_rid = get_acoustid(file_path, revalidate=True, cache_lock=cache_lock)
-    return metadata, acoustid_rid
-
-def get_file_metadata(file_path, revalidate=False, cache_lock=None):
-    """Fetches or re-validates metadata, using and managing the cache lock."""
-    if cache_lock is None:
-        cache_lock = threading.Lock() #dummy lock
-    with cache_lock:
-        if not revalidate and file_path in file_cache and 'metadata' in file_cache[file_path]:
-            return file_cache[file_path]['metadata']
-
-    try:
-        audio = File(file_path, easy=True)
-        if audio is None:
-            logging.warning(f"Unsupported file format or corrupted file: {file_path}")
-            return None
-
-        file_metadata = {}
-        file_metadata['size'] = os.path.getsize(file_path)
-        file_metadata['mtime'] = os.path.getmtime(file_path)
-        file_metadata['artist'] = audio.get('artist', ['Unknown Artist'])[0].lower()
-        file_metadata['title'] = audio.get('title', ['Unknown Title'])[0].lower()
-        file_metadata['album'] = audio.get('album', ['Unknown Album'])[0].lower()
-        file_metadata['tracknumber'] = audio.get('tracknumber', [0])[0]
-
-        file_extension = os.path.splitext(file_path)[1].lower()
-        file_metadata['format'] = file_extension.strip('.')
-        with cache_lock:
-            summary_stats['files_by_format'].setdefault(file_metadata['format'], 0)
-            summary_stats['files_by_format'][file_metadata['format']] += 1
-
-        with cache_lock:
-            file_cache.setdefault(file_path, {})
-            file_cache[file_path]['metadata'] = file_metadata
-        return file_metadata
-    except FileNotFoundError as e:
-        logging.error(f"File not found: {file_path} - {e}")
-        return None
-    except Exception as e:
-        logging.error(f"Failed to get metadata for {file_path}: {e}")
-        return None
-
 @sleep_and_retry
 @limits(calls=3, period=1)
 def acoustid_lookup(api_key, fingerprint, duration):
     """Performs AcoustID lookup with rate limiting."""
     return acoustid.lookup(api_key, fingerprint, duration, meta='recordings artists')
-
-def get_acoustid(file_path, revalidate=False, cache_lock=None):
-    """Fetches/re-validates AcoustID, managing the cache lock."""
-    if cache_lock is None:
-        cache_lock = threading.Lock() #dummy
-    with cache_lock:
-        if not revalidate and file_path in file_cache and 'acoustid' in file_cache[file_path]:
-            return file_cache[file_path]['acoustid']
-
-    try:
-        result = subprocess.run(['fpcalc', '-json', file_path], capture_output=True, text=True, check=True)
-        fingerprint_data = json.loads(result.stdout)
-        duration = fingerprint_data['duration']
-        fingerprint = fingerprint_data['fingerprint']
-
-        response = acoustid_lookup(ACOUSTID_API_KEY, fingerprint, duration)
-        if response['status'] != 'ok':
-            error_message = response.get('error', {}).get('message', 'Unknown error')
-            logging.warning(f"AcoustID lookup failed for {file_path}: {error_message}")
-            return None
-
-        results = response.get('results', [])
-        if not results:
-            return None
-
-        # Select the best result based on score and presence of recordings
-        best_result = max(results, key=lambda x: (x.get('score', 0), len(x.get('recordings', []))), default=None)
-        if not best_result:
-            return None
-
-        recordings = best_result.get('recordings', [])
-        if not recordings:
-            return None
-
-        # Find the recording that best matches the file's metadata
-        best_recording = None
-        best_score = -1
-
-        metadata = get_file_metadata(file_path, revalidate=revalidate, cache_lock=cache_lock)  # Ensure you have metadata
-        if metadata:
-            for rec in recordings:
-                title_match = fuzz.ratio(metadata.get('title', ''), rec.get('title', '').lower())
-                artist_match = fuzz.ratio(metadata.get('artist', ''), rec.get('artists', [{}])[0].get('name', '').lower())  # Consider first artist
-                score = (title_match + artist_match) / 2  # Simple average
-
-                if score > best_score:
-                    best_score = score
-                    best_recording = rec
-
-        rid = best_recording.get('id') if best_recording else None
-        if rid is None: return None
-
-
-        with cache_lock:
-            file_cache.setdefault(file_path, {})
-            file_cache[file_path]['acoustid'] = rid
-        return rid
-    except FileNotFoundError as e:
-        logging.error(f"File not found: {file_path} - {e}")
-        return None
-    except subprocess.CalledProcessError as e:
-        logging.error(f"fpcalc failed for {file_path}: {e}")
-        return None
-    except Exception as e:
-        logging.error(f"AcoustID lookup failed for {file_path}: {e}")
-        return None
 
 def fuzzy_match(metadata1, metadata2):
     """Performs fuzzy matching between two metadata sets."""
@@ -276,14 +117,178 @@ def fuzzy_match(metadata1, metadata2):
     avg_match = (title_match + artist_match + album_match) / 3
     return avg_match
 
+# --- Cache Management (SQLite) ---
+
+def init_cache_db():
+    """Initializes the SQLite database for caching."""
+    with sqlite3.connect(CACHE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS file_cache (
+                file_path TEXT PRIMARY KEY,
+                metadata TEXT,
+                acoustid TEXT,
+                mtime REAL
+            )
+        ''')
+        conn.commit()
+
+def get_cached_data(file_path):
+    """Retrieves cached data from the database."""
+    with sqlite3.connect(CACHE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT metadata, acoustid, mtime FROM file_cache WHERE file_path = ?', (file_path,))
+        result = cursor.fetchone()
+        if result:
+            metadata_str, acoustid_rid, mtime = result
+            try:
+                metadata = json.loads(metadata_str)  # Deserialize JSON
+                return metadata, acoustid_rid, mtime
+            except json.JSONDecodeError:
+                logging.warning(f"Corrupted metadata in cache for {file_path}, ignoring.")
+                return None, None, None # Return None if the JSON is invalid
+        return None, None, None
+
+def update_cache(file_path, metadata, acoustid_rid, mtime):
+    """Updates or inserts data into the cache database."""
+    with sqlite3.connect(CACHE_DB) as conn:
+        cursor = conn.cursor()
+        metadata_str = json.dumps(metadata)  # Serialize metadata to JSON
+        cursor.execute('''
+            REPLACE INTO file_cache (file_path, metadata, acoustid, mtime)
+            VALUES (?, ?, ?, ?)
+        ''', (file_path, metadata_str, acoustid_rid, mtime))
+        conn.commit()
+
+def clear_cache():
+    """Clears the entire cache database."""
+    with sqlite3.connect(CACHE_DB) as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM file_cache')
+        conn.commit()
+        logging.info("Cache cleared.")
+
+
+# --- Modified File Processing Functions (using SQLite cache) ---
+
+def validate_cached_data(file_path):
+    """Re-validates cached data; fetches from DB if valid."""
+    file_mtime = os.path.getmtime(file_path)
+    cached_metadata, acoustid_rid, cached_mtime = get_cached_data(file_path)
+
+    if cached_mtime == file_mtime and cached_metadata is not None:
+        return cached_metadata, acoustid_rid  # Return cached data
+    else:
+        metadata = get_file_metadata(file_path, revalidate=True)
+        acoustid_rid = get_acoustid(file_path, revalidate=True)
+        return metadata, acoustid_rid
+
+def get_file_metadata(file_path, revalidate=False):
+    """Fetches/revalidates metadata, now using the SQLite cache."""
+    if not revalidate:
+        cached_metadata, _, _ = get_cached_data(file_path)
+        if cached_metadata:
+            return cached_metadata
+
+    try:
+        audio = File(file_path, easy=True)
+        if audio is None:
+            logging.warning(f"Unsupported or corrupted file: {file_path}")
+            return None
+
+        file_metadata = {
+            'size': os.path.getsize(file_path),
+            'mtime': os.path.getmtime(file_path),
+            'artist': audio.get('artist', ['Unknown Artist'])[0].lower(),
+            'title': audio.get('title', ['Unknown Title'])[0].lower(),
+            'album': audio.get('album', ['Unknown Album'])[0].lower(),
+            'tracknumber': audio.get('tracknumber', [0])[0],
+            'format': os.path.splitext(file_path)[1].lower().strip('.')
+        }
+
+        # Update summary statistics (keep this outside the cache)
+        summary_stats['files_by_format'].setdefault(file_metadata['format'], 0)
+        summary_stats['files_by_format'][file_metadata['format']] += 1
+        update_cache(file_path, file_metadata, None, file_metadata['mtime']) # Cache, but AcoustID is None
+        return file_metadata
+
+    except (FileNotFoundError, Exception) as e:
+        logging.error(f"Failed to get metadata for {file_path}: {e}")
+        return None
+
+def get_acoustid(file_path, revalidate=False):
+    """Fetches/revalidates AcoustID, using the SQLite cache."""
+    if not revalidate:
+        _, cached_acoustid, _ = get_cached_data(file_path)
+        if cached_acoustid:
+            return cached_acoustid
+
+    try:
+        result = subprocess.run(['fpcalc', '-json', file_path], capture_output=True, text=True, check=True)
+        fingerprint_data = json.loads(result.stdout)
+        duration = fingerprint_data['duration']
+        fingerprint = fingerprint_data['fingerprint']
+
+        response = acoustid_lookup(ACOUSTID_API_KEY, fingerprint, duration)
+        if response['status'] != 'ok':
+            logging.warning(f"AcoustID lookup failed for {file_path}: {response.get('error', {}).get('message', 'Unknown error')}")
+            return None
+
+        results = response.get('results', [])
+        best_result = max(results, key=lambda x: (x.get('score', 0), len(x.get('recordings', []))), default=None) if results else None
+        if not best_result:
+          return None
+        recordings = best_result.get('recordings', [])
+        best_recording = None
+        best_score = -1
+        #Get metadata, but don't revalidate, as that was just done
+        metadata = get_file_metadata(file_path, revalidate=False)  # No need to revalidate
+
+        if metadata:
+            for rec in recordings:
+                title_match = fuzz.ratio(metadata.get('title', ''), rec.get('title', '').lower())
+                artist_match = fuzz.ratio(metadata.get('artist',''), rec.get('artists',[{}])[0].get('name','').lower())
+                score = (title_match + artist_match) / 2
+                if score > best_score:
+                    best_score = score
+                    best_recording = rec
+        rid = best_recording.get('id') if best_recording else None
+        if not rid: return None # Ensure rid is not None
+
+        # Update the cache *with* the AcoustID
+        _, _, cached_mtime = get_cached_data(file_path) # Get mtime from the cache
+        if cached_mtime is None: # If not in cache for some reason, get it
+          cached_mtime = os.path.getmtime(file_path)
+        update_cache(file_path, metadata, rid, cached_mtime) #update with AcoustId
+        return rid
+
+    except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
+        logging.error(f"AcoustID processing failed for {file_path}: {e}")
+        return None
+
+def process_file_metadata(file_path):
+    """Processes a file to extract metadata."""
+    metadata = get_file_metadata(file_path)
+    if not metadata:
+        return None
+    metadata_key = (metadata['artist'], metadata['title'], metadata['album'])
+    return metadata_key, file_path
+
+def process_file_acoustid(file_path):
+    """Processes a file to obtain its AcoustID."""
+    rid = get_acoustid(file_path)
+    if rid:
+        return rid, file_path
+    return None
+
 def find_duplicates(directory, verbose=False, use_multiprocessing=True):
-    """Scans directory for music files and identifies duplicates (directory-based)."""
     files_by_metadata = {}
     duplicates = []
     start_time = time.time()
     potential_duplicate_dirs = set()
+    init_cache_db() # Initialize the database
 
-    # Collect all directories containing supported music files
+   # Collect all directories containing supported music files
     for root, _, files in os.walk(directory):
         has_music_files = False
         for file in files:
@@ -309,7 +314,7 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True):
                         logging.warning(f"Skipping non-file: {file_path}")
                         continue
 
-                    result = pool.apply_async(process_file_metadata, args=(file_path, cache_lock)) #async
+                    result = pool.apply_async(process_file_metadata, args=(file_path,)) #async
                     #get result.get()
                     try:
                       result_value = result.get() #get the result.  Will raise exception if the process failed
@@ -320,52 +325,43 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True):
                     except Exception as e:
                       logging.error(f"Error processing file {file_path}: {e}") #log and continue
 
-
-
-            # Verbose output during processing
             if verbose:
                 elapsed_time = time.time() - start_time
-                if summary_stats['total_files_processed'] > 0: #avoid div/0
-                  files_per_sec = summary_stats['total_files_processed'] / elapsed_time
-                  logging.info(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
+                if summary_stats['total_files_processed'] > 0:  # Avoid ZeroDivisionError
+                    files_per_sec = summary_stats['total_files_processed'] / elapsed_time
+                    logging.info(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
+            gc.collect()  # Manual garbage collection
 
-            save_cache(cache_lock)  # Save cache periodically
-            gc.collect()
-
-    else:  # Single-threaded processing
+    else:  # Single-threaded processing (for debugging)
         for dir_path in potential_duplicate_dirs:
             for file_name in os.listdir(dir_path):
                 file_path = os.path.join(dir_path, file_name)
                 if not file_name.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
                     continue
-
                 if os.path.islink(file_path) and not os.path.exists(file_path):
                     logging.warning(f"Skipping broken symbolic link: {file_path}")
                     continue
                 if not os.path.isfile(file_path):
-                     logging.warning(f"Skipping non-file: {file_path}")
-                     continue
+                    logging.warning(f"Skipping non-file: {file_path}")
+                    continue
 
-                result = process_file_metadata(file_path, cache_lock)
+                result = process_file_metadata(file_path)
                 if result:
                     key, file_path_res = result
                     files_by_metadata.setdefault(key, []).append(file_path_res)
                     summary_stats['total_files_processed'] += 1
 
-            # Verbose output during processing
             if verbose:
                 elapsed_time = time.time() - start_time
-                if summary_stats['total_files_processed'] > 0:
-                  files_per_sec = summary_stats['total_files_processed'] / elapsed_time
-                  logging.info(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
-            save_cache(cache_lock)
+                if summary_stats['total_files_processed'] > 0:  # Avoid ZeroDivisionError
+                    files_per_sec = summary_stats['total_files_processed'] / elapsed_time
+                    logging.info(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
             gc.collect()
 
-
-    # Identify potential duplicates based on metadata (whole directories)
+        # Identify potential duplicates based on metadata
     for file_list in files_by_metadata.values():
         if len(file_list) > 1:
-            # Add the entire directory to potential duplicates if any files within it are potential duplicates
+            # Add *all* files in the matching metadata group to potential duplicates
             potential_duplicate_dirs.add(os.path.dirname(file_list[0]))
 
     # Perform AcoustID fingerprinting on potential duplicates (considering whole directories)
@@ -381,7 +377,7 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True):
                         progress_bar = tqdm(total=len(file_list), desc=f"AcoustID Lookups ({os.path.basename(dir_path)})", unit="file")
 
                     # Use imap_unordered for asynchronous processing and immediate result handling
-                    for result in pool.imap_unordered(process_file_acoustid, [(f, cache_lock) for f in file_list]):
+                    for result in pool.imap_unordered(process_file_acoustid, file_list):
                         if result:
                             rid, file_path = result
                             dir_acoustid_results.setdefault(dir_path, {}).setdefault(rid, []).append(file_path)
@@ -397,7 +393,7 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True):
                     progress_bar = tqdm(total=len(file_list), desc=f"AcoustID Lookups ({os.path.basename(dir_path)})", unit="file")
 
                 for file_path in file_list:
-                    result = process_file_acoustid((file_path, cache_lock)) #pass the lock
+                    result = process_file_acoustid(file_path) #pass the lock
                     if result:
                         rid, file_path_res = result
                         dir_acoustid_results.setdefault(dir_path, {}).setdefault(rid, []).append(file_path_res)
@@ -417,23 +413,16 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True):
 
     summary_stats['total_duplicates_found'] = len(duplicates)
     return duplicates
-def process_file_metadata(file_path, cache_lock):
-    """Processes a file, gets metadata, and returns key and file path."""
-    metadata = get_file_metadata(file_path, cache_lock=cache_lock)
-    if not metadata:
-        return None
-    metadata_key = (metadata['artist'], metadata['title'], metadata['album'])
-    return metadata_key, file_path
 
-
-def process_file_acoustid(args):
-    """Processes a file to obtain its AcoustID (unpacking arguments)."""
-    file_path, cache_lock = args
-    rid = get_acoustid(file_path, cache_lock=cache_lock)
-    if rid:
-        return rid, file_path
-    return None
-
+# Summary statistics (moved here to avoid repeated definitions)
+summary_stats = {
+    'total_files_processed': 0,
+    'total_duplicates_found': 0,
+    'total_files_to_remove': 0,
+    'total_storage_to_save': 0,
+    'files_by_format': {},
+    'total_acoustid_lookups': 0
+}
 
 def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run):
     """Resolves duplicates (list, move, delete) - directory-based."""
@@ -548,6 +537,8 @@ def main():
     parser.add_argument('--log-level', default='INFO', help="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).")
     parser.add_argument('--no-multiprocessing', action='store_true', help="Disable multiprocessing.")
     parser.add_argument('--dry-run', action='store_true', help="Perform a dry run without modifying files.")
+    parser.add_argument('--clear-cache', action='store_true', help="Clear the cache database before running.")
+
     args = parser.parse_args()
 
     log_level = getattr(logging, args.log_level.upper(), None)
@@ -564,6 +555,9 @@ def main():
         logging.error("fpcalc not found. Please ensure it's installed and in your PATH.")
         sys.exit(1)
 
+    if args.clear_cache:
+        clear_cache()
+
     start_time = time.time()
     logging.info("Starting music deduplication process...")
     logging.info(f"Scanning directory: {args.path}")
@@ -576,10 +570,12 @@ def main():
     else:
         logging.info("No duplicates found.")
 
-    save_cache(cache_lock)
+
     total_time = time.time() - start_time
     logging.info(f"\nCompleted in {total_time:.2f} seconds.")
     display_summary()
 
 if __name__ == "__main__":
     main()
+
+                                                         
