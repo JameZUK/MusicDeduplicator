@@ -15,7 +15,7 @@ import logging
 from tqdm import tqdm
 from ratelimit import limits, sleep_and_retry
 import sqlite3
-import hashlib  # Import hashlib
+import hashlib
 
 # Configuration file and cache database file
 CONFIG_FILE = 'config.json'
@@ -299,9 +299,9 @@ summary_stats = {
 }
 
 def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run):
-    """Resolves duplicates (list, move, delete) - directory-based."""
+    """Resolves duplicates (list, move, delete) - directory-based and intra-directory."""
     for duplicate_set in duplicates:
-        # Determine the best directory to keep (prioritize FLAC and largest total size)
+        # 1. Determine the best directory to keep (prioritize FLAC and largest total size).
         best_dir = None
         best_dir_size = -1
         dir_stats = {}
@@ -310,35 +310,37 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
             dir_stats[dir_path] = {'size': 0, 'has_flac': False}
             for root, _, files in os.walk(dir_path):
                 for f in files:
-                    f_path = os.path.join(root,f)
+                    f_path = os.path.join(root, f)
                     if os.path.isfile(f_path):
                         dir_stats[dir_path]['size'] += os.path.getsize(f_path)
                         if f.lower().endswith('.flac'):
                             dir_stats[dir_path]['has_flac'] = True
 
         for dir_path, stats in dir_stats.items():
-            if best_dir is None or (stats['has_flac'] and not dir_stats.get(best_dir,{}).get('has_flac', False)) or \
-               (stats['has_flac'] == dir_stats.get(best_dir,{}).get('has_flac',False) and stats['size'] > best_dir_size):
+            if best_dir is None or (stats['has_flac'] and not dir_stats.get(best_dir, {}).get('has_flac', False)) or \
+                    (stats['has_flac'] == dir_stats.get(best_dir, {}).get('has_flac', False) and stats['size'] > best_dir_size):
                 best_dir = dir_path
                 best_dir_size = stats['size']
-        # Determine directories to delete/move
+
+        # 2. Determine directories to delete/move.
         dirs_to_remove = [dir_path for dir_path in dir_stats if dir_path != best_dir]
 
-        # Calculate total files and size *before* any action
+        # 3. Calculate total files and size *before* any action for inter-directory duplicates.
         files_to_remove_count = 0
         total_size_to_remove = 0
         for dir_path_to_remove in dirs_to_remove:
-             for root, _, files in os.walk(dir_path_to_remove):
+            for root, _, files in os.walk(dir_path_to_remove):
                 for f in files:
                     file_path = os.path.join(root, f)
                     if os.path.isfile(file_path):
-                      files_to_remove_count += 1
-                      total_size_to_remove += os.path.getsize(file_path)
+                        files_to_remove_count += 1
+                        total_size_to_remove += os.path.getsize(file_path)
 
         summary_stats['total_files_to_remove'] += files_to_remove_count
         summary_stats['total_storage_to_save'] += total_size_to_remove
 
 
+        # 4. Perform actions on INTER-directory duplicates.
         if action == 'list':
             logging.info(f"Best directory: {best_dir}")
             for dir_to_remove in dirs_to_remove:
@@ -353,13 +355,18 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
                 delete_duplicates(dirs_to_remove)
             else:
                  logging.info(f"[DRY RUN] Would delete directories: {dirs_to_remove}")
-        # --- Intra-directory duplicate detection (AcoustID) ---
-        for dir_path in duplicate_set:
+
+        # 5. Intra-directory duplicate detection and handling (within EACH directory of the duplicate set).
+        for dir_path in duplicate_set:  # Iterate through ALL directories in the set
+            if not os.path.exists(dir_path):
+                logging.warning(f"Skipping intra-directory check for non-existent path: {dir_path}")
+                continue #skip if it doesn't exist
+
             files_in_dir = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))]
             acoustid_map = {}
             for file_name in files_in_dir:
                 file_path = os.path.join(dir_path, file_name)
-                acoustid_rid = get_acoustid(file_path) #don't revalidate
+                acoustid_rid = get_acoustid(file_path)  # Don't revalidate
                 if acoustid_rid:
                     if acoustid_rid in acoustid_map:
                         # Duplicate AcoustID WITHIN the directory
@@ -368,54 +375,50 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
                         logging.info(f"  File 1: {existing_file}")
                         logging.info(f"  File 2: {file_path}")
 
-                        # ... (same decision logic as in method 1, for delete/move/dry-run) ...
+                        # Handle intra-directory duplicates based on action
                         if action == 'delete' and not dry_run:
-                           #Prioritize FLAC
-                           if file_path.lower().endswith(".flac") and not existing_file.lower().endswith(".flac"):
+                            if file_path.lower().endswith(".flac") and not existing_file.lower().endswith(".flac"):
                                 os.remove(existing_file)
-                                acoustid_map[acoustid_rid] = file_path #replace with new file
+                                acoustid_map[acoustid_rid] = file_path
                                 logging.info(f"    Deleted: {existing_file}")
-                           elif existing_file.lower().endswith(".flac") and not file_path.lower().endswith(".flac"):
+                            elif existing_file.lower().endswith(".flac") and not file_path.lower().endswith(".flac"):
                                 os.remove(file_path)
                                 logging.info(f"    Deleted: {file_path}")
+                            else:
+                                if os.path.getsize(file_path) > os.path.getsize(existing_file):
+                                    os.remove(existing_file)
+                                    acoustid_map[acoustid_rid] = file_path
+                                    logging.info(f"    Deleted: {existing_file}")
+                                else:
+                                    os.remove(file_path)
+                                    logging.info(f"    Deleted: {file_path}")
 
-                           else: #if both are FLAC or both are not
-                               #keep largest file
-                               if os.path.getsize(file_path) > os.path.getsize(existing_file):
-                                   os.remove(existing_file)
-                                   acoustid_map[acoustid_rid] = file_path #replace
-                                   logging.info(f"    Deleted: {existing_file}")
-                               else:
-                                   os.remove(file_path)
-                                   logging.info(f"    Deleted: {file_path}")
                         elif action == 'move' and move_dir and not dry_run:
-                           # Similar logic to delete, but move instead
-                           # Create a subfolder in move_dir for intra-directory duplicates
-                           intra_dir = os.path.join(move_dir, "intra_duplicates", os.path.basename(dir_path))
-                           os.makedirs(intra_dir, exist_ok=True) #makedirs
+                            intra_dir = os.path.join(move_dir, "intra_duplicates", os.path.basename(dir_path))
+                            os.makedirs(intra_dir, exist_ok=True)
 
-                           if file_path.lower().endswith(".flac") and not existing_file.lower().endswith(".flac"):
+                            if file_path.lower().endswith(".flac") and not existing_file.lower().endswith(".flac"):
                                 shutil.move(existing_file, os.path.join(intra_dir, os.path.basename(existing_file)))
                                 acoustid_map[acoustid_rid] = file_path
                                 logging.info(f"    Moved: {existing_file} to {intra_dir}")
-                           elif existing_file.lower().endswith(".flac") and not file_path.lower().endswith(".flac"):
+                            elif existing_file.lower().endswith(".flac") and not file_path.lower().endswith(".flac"):
                                 shutil.move(file_path, os.path.join(intra_dir, os.path.basename(file_path)))
                                 logging.info(f"    Moved: {file_path} to {intra_dir}")
-
-                           else: #if both are flac or both are not flac, keep largest
-                               if os.path.getsize(file_path) > os.path.getsize(existing_file):
+                            else:
+                                if os.path.getsize(file_path) > os.path.getsize(existing_file):
                                     shutil.move(existing_file, os.path.join(intra_dir, os.path.basename(existing_file)))
-                                    acoustid_map[acoustid_rid] = file_path  # Update the map
+                                    acoustid_map[acoustid_rid] = file_path
                                     logging.info(f"    Moved: {existing_file} to {intra_dir}")
-                               else:
-                                   shutil.move(file_path, os.path.join(intra_dir, os.path.basename(file_path)))
-                                   logging.info(f"    Moved: {file_path} to {intra_dir}")
+                                else:
+                                    shutil.move(file_path, os.path.join(intra_dir, os.path.basename(file_path)))
+                                    logging.info(f"    Moved: {file_path} to {intra_dir}")
+
                         elif dry_run:
                             logging.info(f"[DRY RUN] Would remove intra-directory duplicate (AcoustID): {file_path}")
-
-
                     else:
                         acoustid_map[acoustid_rid] = file_path
+
+
 
 def move_duplicates(dirs_to_remove, original_dir, move_dir, base_dir):
     """Moves duplicate directories, preserving structure."""
