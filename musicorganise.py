@@ -14,12 +14,12 @@ import threading
 import logging
 from tqdm import tqdm
 from ratelimit import limits, sleep_and_retry
-import sqlite3  # Import sqlite3
+import sqlite3
+import hashlib  # Import hashlib
 
 # Configuration file and cache database file
 CONFIG_FILE = 'config.json'
-CACHE_DB = 'file_cache.db'  # Use a SQLite database for the cache
-
+CACHE_DB = 'file_cache.db'
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -34,17 +34,15 @@ def save_config(config):
 # Load configuration parameters
 config = load_config()
 ACOUSTID_API_KEY = config.get('acoustid_api_key', None)
-FUZZY_THRESHOLD = config.get('fuzzy_threshold', 90)  # Default threshold is 90
+FUZZY_THRESHOLD = config.get('fuzzy_threshold', 90)
 BATCH_SIZE = config.get('batch_size', 1000)
 SUPPORTED_EXTENSIONS = config.get('supported_extensions', ['.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac'])
 
-# If no API key, prompt user and save it to the config file
 if not ACOUSTID_API_KEY:
     ACOUSTID_API_KEY = input("Please enter your AcoustID API key: ").strip()
     config['acoustid_api_key'] = ACOUSTID_API_KEY
     save_config(config)
 
-# If no fuzzy threshold exists, prompt user to set it
 if 'fuzzy_threshold' not in config:
     try:
         FUZZY_THRESHOLD = int(input("Please enter the fuzzy match threshold (default is 90): ").strip() or 90)
@@ -53,7 +51,6 @@ if 'fuzzy_threshold' not in config:
     config['fuzzy_threshold'] = FUZZY_THRESHOLD
     save_config(config)
 
-# If no batch size is set, prompt user to set it
 if BATCH_SIZE is None:
     try:
         BATCH_SIZE = int(input("Please enter the batch size for processing files (default is 1000): ").strip() or 1000)
@@ -62,41 +59,28 @@ if BATCH_SIZE is None:
     config['batch_size'] = BATCH_SIZE
     save_config(config)
 
-# Prompt for supported extensions if not set
 if 'supported_extensions' not in config:
     ext_input = input("Please enter the supported file extensions (comma-separated, default is .mp3,.flac,.ogg,.wav,.m4a,.aac): ").strip()
     SUPPORTED_EXTENSIONS = [ext.strip().lower() for ext in (ext_input or '.mp3,.flac,.ogg,.wav,.m4a,.aac').split(',')]
     config['supported_extensions'] = SUPPORTED_EXTENSIONS
     save_config(config)
 
-# Set up logging
 def setup_logging(log_level):
     logger = logging.getLogger()
     logger.setLevel(log_level)
-
-    # Create file handler which logs even debug messages
     fh = logging.FileHandler('music_deduplicate.log', encoding='utf-8')
     fh.setLevel(logging.DEBUG)
-
-    # Create console handler with a higher log level
     ch = logging.StreamHandler()
     ch.setLevel(log_level)
-
-    # Create formatter and add it to the handlers
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     fh.setFormatter(formatter)
     ch.setFormatter(formatter)
-
-    # Remove existing handlers to prevent duplicate logs
     if logger.hasHandlers():
         logger.handlers.clear()
-
-    # Add the handlers to the logger
     logger.addHandler(fh)
     logger.addHandler(ch)
 
 def check_fpcalc():
-    """Checks if fpcalc is available."""
     try:
         subprocess.run(['fpcalc', '-version'], check=True, capture_output=True, text=True)
         return True
@@ -106,21 +90,16 @@ def check_fpcalc():
 @sleep_and_retry
 @limits(calls=3, period=1)
 def acoustid_lookup(api_key, fingerprint, duration):
-    """Performs AcoustID lookup with rate limiting."""
     return acoustid.lookup(api_key, fingerprint, duration, meta='recordings artists')
 
 def fuzzy_match(metadata1, metadata2):
-    """Performs fuzzy matching between two metadata sets."""
     title_match = fuzz.ratio(metadata1['title'], metadata2['title'])
     artist_match = fuzz.ratio(metadata1['artist'], metadata2['artist'])
     album_match = fuzz.ratio(metadata1['album'], metadata2['album'])
     avg_match = (title_match + artist_match + album_match) / 3
     return avg_match
 
-# --- Cache Management (SQLite) ---
-
 def init_cache_db():
-    """Initializes the SQLite database for caching."""
     with sqlite3.connect(CACHE_DB) as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -134,7 +113,6 @@ def init_cache_db():
         conn.commit()
 
 def get_cached_data(file_path):
-    """Retrieves cached data from the database."""
     with sqlite3.connect(CACHE_DB) as conn:
         cursor = conn.cursor()
         cursor.execute('SELECT metadata, acoustid, mtime FROM file_cache WHERE file_path = ?', (file_path,))
@@ -142,18 +120,17 @@ def get_cached_data(file_path):
         if result:
             metadata_str, acoustid_rid, mtime = result
             try:
-                metadata = json.loads(metadata_str)  # Deserialize JSON
+                metadata = json.loads(metadata_str)
                 return metadata, acoustid_rid, mtime
             except json.JSONDecodeError:
                 logging.warning(f"Corrupted metadata in cache for {file_path}, ignoring.")
-                return None, None, None # Return None if the JSON is invalid
+                return None, None, None
         return None, None, None
 
 def update_cache(file_path, metadata, acoustid_rid, mtime):
-    """Updates or inserts data into the cache database."""
     with sqlite3.connect(CACHE_DB) as conn:
         cursor = conn.cursor()
-        metadata_str = json.dumps(metadata)  # Serialize metadata to JSON
+        metadata_str = json.dumps(metadata)
         cursor.execute('''
             REPLACE INTO file_cache (file_path, metadata, acoustid, mtime)
             VALUES (?, ?, ?, ?)
@@ -161,30 +138,23 @@ def update_cache(file_path, metadata, acoustid_rid, mtime):
         conn.commit()
 
 def clear_cache():
-    """Clears the entire cache database."""
     with sqlite3.connect(CACHE_DB) as conn:
         cursor = conn.cursor()
         cursor.execute('DELETE FROM file_cache')
         conn.commit()
         logging.info("Cache cleared.")
 
-
-# --- Modified File Processing Functions (using SQLite cache) ---
-
 def validate_cached_data(file_path):
-    """Re-validates cached data; fetches from DB if valid."""
     file_mtime = os.path.getmtime(file_path)
     cached_metadata, acoustid_rid, cached_mtime = get_cached_data(file_path)
-
     if cached_mtime == file_mtime and cached_metadata is not None:
-        return cached_metadata, acoustid_rid  # Return cached data
+        return cached_metadata, acoustid_rid
     else:
         metadata = get_file_metadata(file_path, revalidate=True)
         acoustid_rid = get_acoustid(file_path, revalidate=True)
         return metadata, acoustid_rid
 
 def get_file_metadata(file_path, revalidate=False):
-    """Fetches/revalidates metadata, now using the SQLite cache."""
     if not revalidate:
         cached_metadata, _, _ = get_cached_data(file_path)
         if cached_metadata:
@@ -205,11 +175,9 @@ def get_file_metadata(file_path, revalidate=False):
             'tracknumber': audio.get('tracknumber', [0])[0],
             'format': os.path.splitext(file_path)[1].lower().strip('.')
         }
-
-        # Update summary statistics (keep this outside the cache)
         summary_stats['files_by_format'].setdefault(file_metadata['format'], 0)
         summary_stats['files_by_format'][file_metadata['format']] += 1
-        update_cache(file_path, file_metadata, None, file_metadata['mtime']) # Cache, but AcoustID is None
+        update_cache(file_path, file_metadata, None, file_metadata['mtime'])
         return file_metadata
 
     except (FileNotFoundError, Exception) as e:
@@ -217,7 +185,6 @@ def get_file_metadata(file_path, revalidate=False):
         return None
 
 def get_acoustid(file_path, revalidate=False):
-    """Fetches/revalidates AcoustID, using the SQLite cache."""
     if not revalidate:
         _, cached_acoustid, _ = get_cached_data(file_path)
         if cached_acoustid:
@@ -228,7 +195,6 @@ def get_acoustid(file_path, revalidate=False):
         fingerprint_data = json.loads(result.stdout)
         duration = fingerprint_data['duration']
         fingerprint = fingerprint_data['fingerprint']
-
         response = acoustid_lookup(ACOUSTID_API_KEY, fingerprint, duration)
         if response['status'] != 'ok':
             logging.warning(f"AcoustID lookup failed for {file_path}: {response.get('error', {}).get('message', 'Unknown error')}")
@@ -241,8 +207,7 @@ def get_acoustid(file_path, revalidate=False):
         recordings = best_result.get('recordings', [])
         best_recording = None
         best_score = -1
-        #Get metadata, but don't revalidate, as that was just done
-        metadata = get_file_metadata(file_path, revalidate=False)  # No need to revalidate
+        metadata = get_file_metadata(file_path, revalidate=False)
 
         if metadata:
             for rec in recordings:
@@ -253,13 +218,12 @@ def get_acoustid(file_path, revalidate=False):
                     best_score = score
                     best_recording = rec
         rid = best_recording.get('id') if best_recording else None
-        if not rid: return None # Ensure rid is not None
+        if not rid: return None
 
-        # Update the cache *with* the AcoustID
-        _, _, cached_mtime = get_cached_data(file_path) # Get mtime from the cache
-        if cached_mtime is None: # If not in cache for some reason, get it
+        _, _, cached_mtime = get_cached_data(file_path)
+        if cached_mtime is None:
           cached_mtime = os.path.getmtime(file_path)
-        update_cache(file_path, metadata, rid, cached_mtime) #update with AcoustId
+        update_cache(file_path, metadata, rid, cached_mtime)
         return rid
 
     except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
@@ -267,7 +231,6 @@ def get_acoustid(file_path, revalidate=False):
         return None
 
 def process_file_metadata(file_path):
-    """Processes a file to extract metadata."""
     metadata = get_file_metadata(file_path)
     if not metadata:
         return None
@@ -275,153 +238,64 @@ def process_file_metadata(file_path):
     return metadata_key, file_path
 
 def process_file_acoustid(file_path):
-    """Processes a file to obtain its AcoustID."""
     rid = get_acoustid(file_path)
     if rid:
         return rid, file_path
     return None
 
-def find_duplicates(directory, verbose=False, use_multiprocessing=True):
-    files_by_metadata = {}
-    duplicates = []
-    start_time = time.time()
-    potential_duplicate_dirs = set()
-    init_cache_db() # Initialize the database
-
-   # Collect all directories containing supported music files
+def calculate_directory_hash(directory):
+    """Calculates a hash representing the contents of a directory."""
+    hashes = []
     for root, _, files in os.walk(directory):
-        has_music_files = False
-        for file in files:
+        for file in sorted(files):  # Sort files for consistent hashing
             if file.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
-                has_music_files = True
-                break
+                file_path = os.path.join(root, file)
+                metadata, acoustid_rid = validate_cached_data(file_path)
+
+                # Use AcoustID if available, otherwise fall back to metadata
+                if acoustid_rid:
+                    hashes.append(acoustid_rid)
+                elif metadata:
+                    # Create a string representation of the relevant metadata
+                    metadata_str = f"{metadata.get('artist','')}-{metadata.get('title','')}-{metadata.get('album','')}"
+                    hashes.append(metadata_str)
+
+    # Combine the hashes (or strings) into a single string and hash that
+    combined_string = ''.join(sorted(hashes)) # sort to ensure consistent hash
+    return hashlib.sha256(combined_string.encode('utf-8')).hexdigest()
+
+
+def find_duplicates(directory, verbose=False, use_multiprocessing=True):
+    """Finds duplicate directories based on content hashes."""
+    dir_hashes = {}
+    duplicates = []
+    init_cache_db()
+
+    # First, calculate hashes for all directories containing music files
+    for root, _, files in os.walk(directory):
+        has_music_files = any(file.lower().endswith(tuple(SUPPORTED_EXTENSIONS)) for file in files)
         if has_music_files:
-            potential_duplicate_dirs.add(os.path.abspath(root))
+            dir_hash = calculate_directory_hash(root)
+            if dir_hash:  # Ensure we have a valid hash
+                dir_hashes.setdefault(dir_hash, []).append(os.path.abspath(root))
+                summary_stats['total_files_processed'] += len([f for f in files if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))])
 
-    if use_multiprocessing:
-        num_processes = cpu_count()
-        ctx = get_context('spawn')
-        with ctx.Pool(processes=num_processes) as pool:
-            for dir_path in potential_duplicate_dirs:
-                for file_name in os.listdir(dir_path):
-                    file_path = os.path.join(dir_path, file_name)
-                    if not file_name.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
-                        continue
-                    if os.path.islink(file_path) and not os.path.exists(file_path):
-                        logging.warning(f"Skipping broken symbolic link: {file_path}")
-                        continue
-                    if not os.path.isfile(file_path):
-                        logging.warning(f"Skipping non-file: {file_path}")
-                        continue
+    # Identify duplicate directories (those with the same hash)
+    for hash_value, dir_list in dir_hashes.items():
+        if len(dir_list) > 1:
+            duplicates.append(dir_list)
+            summary_stats['total_duplicates_found'] += len(dir_list) -1 # Correct count
 
-                    result = pool.apply_async(process_file_metadata, args=(file_path,)) #async
-                    #get result.get()
-                    try:
-                      result_value = result.get() #get the result.  Will raise exception if the process failed
-                      if result_value:
-                          key, file_path_res = result_value
-                          files_by_metadata.setdefault(key, []).append(file_path_res)
-                          summary_stats['total_files_processed'] += 1
-                    except Exception as e:
-                      logging.error(f"Error processing file {file_path}: {e}") #log and continue
-
-            if verbose:
-                elapsed_time = time.time() - start_time
-                if summary_stats['total_files_processed'] > 0:  # Avoid ZeroDivisionError
-                    files_per_sec = summary_stats['total_files_processed'] / elapsed_time
-                    logging.info(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
-            gc.collect()  # Manual garbage collection
-
-    else:  # Single-threaded processing (for debugging)
-        for dir_path in potential_duplicate_dirs:
-            for file_name in os.listdir(dir_path):
-                file_path = os.path.join(dir_path, file_name)
-                if not file_name.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
-                    continue
-                if os.path.islink(file_path) and not os.path.exists(file_path):
-                    logging.warning(f"Skipping broken symbolic link: {file_path}")
-                    continue
-                if not os.path.isfile(file_path):
-                    logging.warning(f"Skipping non-file: {file_path}")
-                    continue
-
-                result = process_file_metadata(file_path)
-                if result:
-                    key, file_path_res = result
-                    files_by_metadata.setdefault(key, []).append(file_path_res)
-                    summary_stats['total_files_processed'] += 1
-
-            if verbose:
-                elapsed_time = time.time() - start_time
-                if summary_stats['total_files_processed'] > 0:  # Avoid ZeroDivisionError
-                    files_per_sec = summary_stats['total_files_processed'] / elapsed_time
-                    logging.info(f"Processed {summary_stats['total_files_processed']} files. Speed: {files_per_sec:.2f} files/sec")
-            gc.collect()
-
-        # Identify potential duplicates based on metadata
-    for file_list in files_by_metadata.values():
-        if len(file_list) > 1:
-            # Add *all* files in the matching metadata group to potential duplicates
-            potential_duplicate_dirs.add(os.path.dirname(file_list[0]))
-
-    # Perform AcoustID fingerprinting on potential duplicates (considering whole directories)
-    dir_acoustid_results = {}  # Store AcoustID results per directory
-    if potential_duplicate_dirs:
-        for dir_path in potential_duplicate_dirs:
-            file_list = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS)) and os.path.isfile(os.path.join(dir_path,f))]
-            if use_multiprocessing:
-                num_processes = cpu_count()
-                ctx = get_context('spawn')
-                with ctx.Pool(processes=num_processes) as pool:
-                    if verbose:
-                        progress_bar = tqdm(total=len(file_list), desc=f"AcoustID Lookups ({os.path.basename(dir_path)})", unit="file")
-
-                    # Use imap_unordered for asynchronous processing and immediate result handling
-                    for result in pool.imap_unordered(process_file_acoustid, file_list):
-                        if result:
-                            rid, file_path = result
-                            dir_acoustid_results.setdefault(dir_path, {}).setdefault(rid, []).append(file_path)
-                            summary_stats['total_acoustid_lookups'] += 1
-                        if verbose:
-                            progress_bar.update(1)  # Update progress for each processed file
-
-                    if verbose:
-                        progress_bar.close()
-
-            else: #single threaded
-                if verbose:
-                    progress_bar = tqdm(total=len(file_list), desc=f"AcoustID Lookups ({os.path.basename(dir_path)})", unit="file")
-
-                for file_path in file_list:
-                    result = process_file_acoustid(file_path) #pass the lock
-                    if result:
-                        rid, file_path_res = result
-                        dir_acoustid_results.setdefault(dir_path, {}).setdefault(rid, []).append(file_path_res)
-                        summary_stats['total_acoustid_lookups'] += 1
-
-                    if verbose:
-                        progress_bar.update(1)
-                if verbose:
-                    progress_bar.close()
-
-
-    # Identify duplicate directories based on AcoustID results
-    for dir_path, acoustid_results in dir_acoustid_results.items():
-        for rid, file_list in acoustid_results.items():
-            if len(file_list) > 1:
-              duplicates.append(file_list)
-
-    summary_stats['total_duplicates_found'] = len(duplicates)
     return duplicates
 
-# Summary statistics (moved here to avoid repeated definitions)
+
 summary_stats = {
     'total_files_processed': 0,
     'total_duplicates_found': 0,
     'total_files_to_remove': 0,
     'total_storage_to_save': 0,
     'files_by_format': {},
-    'total_acoustid_lookups': 0
+    'total_acoustid_lookups': 0  # This might not be accurate anymore, consider removing
 }
 
 def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run):
@@ -432,38 +306,38 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
         best_dir_size = -1
         dir_stats = {}
 
-        for file_path in duplicate_set:
-            dir_path = os.path.dirname(file_path)
-            if dir_path not in dir_stats:
-                dir_stats[dir_path] = {'size': 0, 'has_flac': False}
-                for f in os.listdir(dir_path):
-                    f_path = os.path.join(dir_path,f)
+        for dir_path in duplicate_set:
+            dir_stats[dir_path] = {'size': 0, 'has_flac': False}
+            for root, _, files in os.walk(dir_path):
+                for f in files:
+                    f_path = os.path.join(root,f)
                     if os.path.isfile(f_path):
-                      dir_stats[dir_path]['size'] += os.path.getsize(f_path)
-                      if f.lower().endswith('.flac'):
-                          dir_stats[dir_path]['has_flac'] = True
+                        dir_stats[dir_path]['size'] += os.path.getsize(f_path)
+                        if f.lower().endswith('.flac'):
+                            dir_stats[dir_path]['has_flac'] = True
 
         for dir_path, stats in dir_stats.items():
-            if best_dir is None or (stats['has_flac'] and not dir_stats[best_dir]['has_flac']) or \
-               (stats['has_flac'] == dir_stats[best_dir]['has_flac'] and stats['size'] > best_dir_size):
+            if best_dir is None or (stats['has_flac'] and not dir_stats.get(best_dir,{}).get('has_flac', False)) or \
+               (stats['has_flac'] == dir_stats.get(best_dir,{}).get('has_flac',False) and stats['size'] > best_dir_size):
                 best_dir = dir_path
                 best_dir_size = stats['size']
-
         # Determine directories to delete/move
         dirs_to_remove = [dir_path for dir_path in dir_stats if dir_path != best_dir]
 
-        # Calculate total files and size to remove
-        files_to_remove = []
+        # Calculate total files and size *before* any action
+        files_to_remove_count = 0
+        total_size_to_remove = 0
         for dir_path_to_remove in dirs_to_remove:
-            for f in os.listdir(dir_path_to_remove):
-              file_to_remove = os.path.join(dir_path_to_remove, f)
-              if os.path.isfile(file_to_remove):
-                files_to_remove.append(file_to_remove)
+             for root, _, files in os.walk(dir_path_to_remove):
+                for f in files:
+                    file_path = os.path.join(root, f)
+                    if os.path.isfile(file_path):
+                      files_to_remove_count += 1
+                      total_size_to_remove += os.path.getsize(file_path)
 
-        summary_stats['total_files_to_remove'] += len(files_to_remove)
-        for file_path in files_to_remove:
-          if os.path.exists(file_path):
-            summary_stats['total_storage_to_save'] += os.path.getsize(file_path)
+        summary_stats['total_files_to_remove'] += files_to_remove_count
+        summary_stats['total_storage_to_save'] += total_size_to_remove
+
 
         if action == 'list':
             logging.info(f"Best directory: {best_dir}")
@@ -479,8 +353,69 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
                 delete_duplicates(dirs_to_remove)
             else:
                  logging.info(f"[DRY RUN] Would delete directories: {dirs_to_remove}")
+        # --- Intra-directory duplicate detection (AcoustID) ---
+        for dir_path in duplicate_set:
+            files_in_dir = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))]
+            acoustid_map = {}
+            for file_name in files_in_dir:
+                file_path = os.path.join(dir_path, file_name)
+                acoustid_rid = get_acoustid(file_path) #don't revalidate
+                if acoustid_rid:
+                    if acoustid_rid in acoustid_map:
+                        # Duplicate AcoustID WITHIN the directory
+                        existing_file = acoustid_map[acoustid_rid]
+                        logging.info(f"Potential intra-directory duplicate (AcoustID) in {dir_path}:")
+                        logging.info(f"  File 1: {existing_file}")
+                        logging.info(f"  File 2: {file_path}")
+
+                        # ... (same decision logic as in method 1, for delete/move/dry-run) ...
+                        if action == 'delete' and not dry_run:
+                           #Prioritize FLAC
+                           if file_path.lower().endswith(".flac") and not existing_file.lower().endswith(".flac"):
+                                os.remove(existing_file)
+                                acoustid_map[acoustid_rid] = file_path #replace with new file
+                                logging.info(f"    Deleted: {existing_file}")
+                           elif existing_file.lower().endswith(".flac") and not file_path.lower().endswith(".flac"):
+                                os.remove(file_path)
+                                logging.info(f"    Deleted: {file_path}")
+
+                           else: #if both are FLAC or both are not
+                               #keep largest file
+                               if os.path.getsize(file_path) > os.path.getsize(existing_file):
+                                   os.remove(existing_file)
+                                   acoustid_map[acoustid_rid] = file_path #replace
+                                   logging.info(f"    Deleted: {existing_file}")
+                               else:
+                                   os.remove(file_path)
+                                   logging.info(f"    Deleted: {file_path}")
+                        elif action == 'move' and move_dir and not dry_run:
+                           # Similar logic to delete, but move instead
+                           # Create a subfolder in move_dir for intra-directory duplicates
+                           intra_dir = os.path.join(move_dir, "intra_duplicates", os.path.basename(dir_path))
+                           os.makedirs(intra_dir, exist_ok=True) #makedirs
+
+                           if file_path.lower().endswith(".flac") and not existing_file.lower().endswith(".flac"):
+                                shutil.move(existing_file, os.path.join(intra_dir, os.path.basename(existing_file)))
+                                acoustid_map[acoustid_rid] = file_path
+                                logging.info(f"    Moved: {existing_file} to {intra_dir}")
+                           elif existing_file.lower().endswith(".flac") and not file_path.lower().endswith(".flac"):
+                                shutil.move(file_path, os.path.join(intra_dir, os.path.basename(file_path)))
+                                logging.info(f"    Moved: {file_path} to {intra_dir}")
+
+                           else: #if both are flac or both are not flac, keep largest
+                               if os.path.getsize(file_path) > os.path.getsize(existing_file):
+                                    shutil.move(existing_file, os.path.join(intra_dir, os.path.basename(existing_file)))
+                                    acoustid_map[acoustid_rid] = file_path  # Update the map
+                                    logging.info(f"    Moved: {existing_file} to {intra_dir}")
+                               else:
+                                   shutil.move(file_path, os.path.join(intra_dir, os.path.basename(file_path)))
+                                   logging.info(f"    Moved: {file_path} to {intra_dir}")
+                        elif dry_run:
+                            logging.info(f"[DRY RUN] Would remove intra-directory duplicate (AcoustID): {file_path}")
 
 
+                    else:
+                        acoustid_map[acoustid_rid] = file_path
 
 def move_duplicates(dirs_to_remove, original_dir, move_dir, base_dir):
     """Moves duplicate directories, preserving structure."""
@@ -577,5 +512,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-                                                         
