@@ -9,6 +9,7 @@ from fuzzywuzzy import fuzz
 from mutagen import File
 import time
 import logging
+from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 from ratelimit import limits, sleep_and_retry
 import sqlite3
@@ -274,52 +275,104 @@ def process_file_acoustid(file_path):
 def calculate_directory_hash(directory):
     """Calculates a hash representing the contents of a directory."""
     hashes = []
+    music_files = []
     for root, _, files in os.walk(directory):
-        for file in sorted(files):  # Sort files for consistent hashing
+        for file in sorted(files):
             if file.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
-                file_path = os.path.join(root, file)
-                metadata, acoustid_rid = validate_cached_data(file_path)
+                music_files.append(os.path.join(root, file))
 
-                # Use AcoustID if available, otherwise fall back to metadata
-                if acoustid_rid:
-                    hashes.append(acoustid_rid)
-                elif metadata:
-                    # Create a string representation of the relevant metadata
-                    metadata_str = f"{metadata.get('artist','')}-{metadata.get('title','')}-{metadata.get('album','')}"
-                    hashes.append(metadata_str)
+    for file_path in music_files:
+        metadata, acoustid_rid = validate_cached_data(file_path)
+        if acoustid_rid:
+            hashes.append(acoustid_rid)
+        elif metadata:
+            metadata_str = f"{metadata.get('artist','')}-{metadata.get('title','')}-{metadata.get('album','')}"
+            hashes.append(metadata_str)
 
-    # Combine the hashes (or strings) into a single string and hash that
-    combined_string = ''.join(sorted(hashes)) # sort to ensure consistent hash
+    combined_string = ''.join(sorted(hashes))
     return hashlib.sha256(combined_string.encode('utf-8')).hexdigest()
 
+def _worker_init():
+    """Initialize per-worker SQLite connection for multiprocessing."""
+    global _cache_conn
+    _cache_conn = sqlite3.connect(CACHE_DB)
 
-def find_duplicates(directory, verbose=False, use_multiprocessing=True):
+def _calculate_hash_worker(dir_path):
+    """Worker function for multiprocessing directory hash calculation."""
+    try:
+        dir_hash = calculate_directory_hash(dir_path)
+        music_files = []
+        for root, _, files in os.walk(dir_path):
+            for f in files:
+                if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
+                    music_files.append(os.path.join(root, f))
+        return (dir_path, dir_hash, len(music_files))
+    except Exception as e:
+        logging.error(f"Error processing directory {dir_path}: {e}")
+        return None
+
+def find_duplicates(directory, verbose=False, use_multiprocessing=True, batch_size=1000):
     """Finds duplicate directories based on content hashes."""
     dir_hashes = {}
     duplicates = []
     init_cache_db()
 
-    # First, calculate hashes for all directories containing music files
+    # Collect all directories containing music files
+    music_dirs = []
     for root, _, files in os.walk(directory):
-        has_music_files = any(file.lower().endswith(tuple(SUPPORTED_EXTENSIONS)) for file in files)
-        if has_music_files:
-            dir_hash = calculate_directory_hash(root)
-            if dir_hash:  # Ensure we have a valid hash
-                dir_hashes.setdefault(dir_hash, []).append(os.path.abspath(root))
-                summary_stats['total_files_processed'] += len([f for f in files if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))])
+        if any(f.lower().endswith(tuple(SUPPORTED_EXTENSIONS)) for f in files):
+            music_dirs.append(root)
+
+    if not music_dirs:
+        return duplicates
+
+    total_batches = (len(music_dirs) + batch_size - 1) // batch_size
+    logging.info(f"Found {len(music_dirs)} directories to scan ({total_batches} batch(es) of {batch_size})")
+
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(music_dirs))
+        batch = music_dirs[batch_start:batch_end]
+
+        if total_batches > 1:
+            logging.info(f"Processing batch {batch_idx + 1}/{total_batches} ({len(batch)} directories)")
+
+        if use_multiprocessing:
+            num_workers = min(cpu_count(), 2)  # Cap at 2 to respect API rate limits
+            with Pool(processes=num_workers, initializer=_worker_init) as pool:
+                results = list(tqdm(
+                    pool.imap_unordered(_calculate_hash_worker, batch),
+                    total=len(batch),
+                    desc=f"Scanning directories",
+                    disable=not verbose
+                ))
+        else:
+            results = []
+            for dir_path in tqdm(batch, desc="Scanning directories", disable=not verbose):
+                dir_hash = calculate_directory_hash(dir_path)
+                music_files = [f for f in os.listdir(dir_path)
+                              if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))]
+                results.append((dir_path, dir_hash, len(music_files)))
+
+        for result in results:
+            if result:
+                dir_path, dir_hash, file_count = result
+                if dir_hash:
+                    dir_hashes.setdefault(dir_hash, []).append(os.path.abspath(dir_path))
+                    summary_stats['total_files_processed'] += file_count
 
     # Identify duplicate directories (those with the same hash)
     for hash_value, dir_list in dir_hashes.items():
         if len(dir_list) > 1:
             duplicates.append(dir_list)
-            summary_stats['total_duplicates_found'] += len(dir_list) -1 # Correct count
+            summary_stats['total_duplicates_found'] += len(dir_list) - 1
 
     return duplicates
 
 
 def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run):
     """Resolves duplicates (list, move, delete) - directory-based and intra-directory."""
-    for duplicate_set in duplicates:
+    for duplicate_set in tqdm(duplicates, desc="Resolving duplicates", disable=not verbose):
         # 1. Determine the best directory to keep (prioritize FLAC and largest total size).
         best_dir = None
         best_dir_size = -1
@@ -524,7 +577,9 @@ def main():
     logging.info("Starting music deduplication process...")
     logging.info(f"Scanning directory: {args.path}")
 
-    duplicates = find_duplicates(args.path, verbose=args.verbose, use_multiprocessing=not args.no_multiprocessing)
+    duplicates = find_duplicates(args.path, verbose=args.verbose,
+                                  use_multiprocessing=not args.no_multiprocessing,
+                                  batch_size=BATCH_SIZE)
 
     if duplicates:
         logging.info(f"Found {len(duplicates)} sets of duplicate directories.")
