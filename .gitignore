@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+config.json
+file_cache.db
+music_deduplicate.log
