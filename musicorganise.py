@@ -8,9 +8,6 @@ import acoustid
 from fuzzywuzzy import fuzz
 from mutagen import File
 import time
-import gc
-from multiprocessing import Pool, cpu_count, get_context
-import threading
 import logging
 from tqdm import tqdm
 from ratelimit import limits, sleep_and_retry
@@ -114,13 +111,6 @@ def check_fpcalc():
 @limits(calls=3, period=1)
 def acoustid_lookup(api_key, fingerprint, duration):
     return acoustid.lookup(api_key, fingerprint, duration, meta='recordings artists')
-
-def fuzzy_match(metadata1, metadata2):
-    title_match = fuzz.ratio(metadata1['title'], metadata2['title'])
-    artist_match = fuzz.ratio(metadata1['artist'], metadata2['artist'])
-    album_match = fuzz.ratio(metadata1['album'], metadata2['album'])
-    avg_match = (title_match + artist_match + album_match) / 3
-    return avg_match
 
 def init_cache_db():
     with sqlite3.connect(CACHE_DB) as conn:
