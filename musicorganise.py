@@ -8,18 +8,25 @@ import acoustid
 from fuzzywuzzy import fuzz
 from mutagen import File
 import time
-import gc
-from multiprocessing import Pool, cpu_count, get_context
-import threading
 import logging
+from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 from ratelimit import limits, sleep_and_retry
 import sqlite3
 import hashlib
 
-# Configuration file and cache database file
-CONFIG_FILE = 'config.json'
-CACHE_DB = 'file_cache.db'
+# Configuration file and cache database file (anchored to script directory)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(_SCRIPT_DIR, 'config.json')
+CACHE_DB = os.path.join(_SCRIPT_DIR, 'file_cache.db')
+
+summary_stats = {
+    'total_files_processed': 0,
+    'total_duplicates_found': 0,
+    'total_files_to_remove': 0,
+    'total_storage_to_save': 0,
+    'files_by_format': {},
+}
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -31,44 +38,59 @@ def save_config(config):
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
 
-# Load configuration parameters
-config = load_config()
-ACOUSTID_API_KEY = config.get('acoustid_api_key', None)
-FUZZY_THRESHOLD = config.get('fuzzy_threshold', 90)
-BATCH_SIZE = config.get('batch_size', 1000)
-SUPPORTED_EXTENSIONS = config.get('supported_extensions', ['.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac'])
+# Module-level config globals (populated by load_or_prompt_config())
+ACOUSTID_API_KEY = None
+FUZZY_THRESHOLD = 90
+BATCH_SIZE = 1000
+SUPPORTED_EXTENSIONS = ['.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac']
 
-if not ACOUSTID_API_KEY:
-    ACOUSTID_API_KEY = input("Please enter your AcoustID API key: ").strip()
-    config['acoustid_api_key'] = ACOUSTID_API_KEY
-    save_config(config)
+def load_or_prompt_config(interactive=True):
+    """Load configuration from file, prompting for missing values if interactive."""
+    global ACOUSTID_API_KEY, FUZZY_THRESHOLD, BATCH_SIZE, SUPPORTED_EXTENSIONS
 
-if 'fuzzy_threshold' not in config:
-    try:
-        FUZZY_THRESHOLD = int(input("Please enter the fuzzy match threshold (default is 90): ").strip() or 90)
-    except ValueError:
-        FUZZY_THRESHOLD = 90
-    config['fuzzy_threshold'] = FUZZY_THRESHOLD
-    save_config(config)
+    config = load_config()
+    ACOUSTID_API_KEY = config.get('acoustid_api_key', None)
+    FUZZY_THRESHOLD = config.get('fuzzy_threshold', 90)
+    BATCH_SIZE = config.get('batch_size', 1000)
+    SUPPORTED_EXTENSIONS = config.get('supported_extensions', ['.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac'])
 
-if BATCH_SIZE is None:
-    try:
-        BATCH_SIZE = int(input("Please enter the batch size for processing files (default is 1000): ").strip() or 1000)
-    except ValueError:
-        BATCH_SIZE = 1000
-    config['batch_size'] = BATCH_SIZE
-    save_config(config)
+    if not ACOUSTID_API_KEY:
+        if not interactive:
+            logging.error("AcoustID API key not found in config.json. Run interactively or add 'acoustid_api_key' to config.json.")
+            sys.exit(1)
+        ACOUSTID_API_KEY = input("Please enter your AcoustID API key: ").strip()
+        config['acoustid_api_key'] = ACOUSTID_API_KEY
+        save_config(config)
 
-if 'supported_extensions' not in config:
-    ext_input = input("Please enter the supported file extensions (comma-separated, default is .mp3,.flac,.ogg,.wav,.m4a,.aac): ").strip()
-    SUPPORTED_EXTENSIONS = [ext.strip().lower() for ext in (ext_input or '.mp3,.flac,.ogg,.wav,.m4a,.aac').split(',')]
-    config['supported_extensions'] = SUPPORTED_EXTENSIONS
-    save_config(config)
+    if 'fuzzy_threshold' not in config:
+        if interactive:
+            try:
+                FUZZY_THRESHOLD = int(input("Please enter the fuzzy match threshold (default is 90): ").strip() or 90)
+            except ValueError:
+                FUZZY_THRESHOLD = 90
+        config['fuzzy_threshold'] = FUZZY_THRESHOLD
+        save_config(config)
+
+    if 'batch_size' not in config:
+        if interactive:
+            try:
+                BATCH_SIZE = int(input("Please enter the batch size for processing files (default is 1000): ").strip() or 1000)
+            except ValueError:
+                BATCH_SIZE = 1000
+        config['batch_size'] = BATCH_SIZE
+        save_config(config)
+
+    if 'supported_extensions' not in config:
+        if interactive:
+            ext_input = input("Please enter the supported file extensions (comma-separated, default is .mp3,.flac,.ogg,.wav,.m4a,.aac): ").strip()
+            SUPPORTED_EXTENSIONS = [ext.strip().lower() for ext in (ext_input or '.mp3,.flac,.ogg,.wav,.m4a,.aac').split(',')]
+        config['supported_extensions'] = SUPPORTED_EXTENSIONS
+        save_config(config)
 
 def setup_logging(log_level):
     logger = logging.getLogger()
     logger.setLevel(log_level)
-    fh = logging.FileHandler('music_deduplicate.log', encoding='utf-8')
+    fh = logging.FileHandler(os.path.join(_SCRIPT_DIR, 'music_deduplicate.log'), encoding='utf-8')
     fh.setLevel(logging.DEBUG)
     ch = logging.StreamHandler()
     ch.setLevel(log_level)
@@ -92,62 +114,68 @@ def check_fpcalc():
 def acoustid_lookup(api_key, fingerprint, duration):
     return acoustid.lookup(api_key, fingerprint, duration, meta='recordings artists')
 
-def fuzzy_match(metadata1, metadata2):
-    title_match = fuzz.ratio(metadata1['title'], metadata2['title'])
-    artist_match = fuzz.ratio(metadata1['artist'], metadata2['artist'])
-    album_match = fuzz.ratio(metadata1['album'], metadata2['album'])
-    avg_match = (title_match + artist_match + album_match) / 3
-    return avg_match
+# SQLite connection singleton
+_cache_conn = None
+
+def get_cache_connection():
+    """Get or create the shared SQLite connection."""
+    global _cache_conn
+    if _cache_conn is None:
+        _cache_conn = sqlite3.connect(CACHE_DB)
+    return _cache_conn
+
+def close_cache_connection():
+    """Close the shared SQLite connection."""
+    global _cache_conn
+    if _cache_conn:
+        _cache_conn.close()
+        _cache_conn = None
 
 def init_cache_db():
-    with sqlite3.connect(CACHE_DB) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS file_cache (
-                file_path TEXT PRIMARY KEY,
-                metadata TEXT,
-                acoustid TEXT,
-                mtime REAL
-            )
-        ''')
-        conn.commit()
+    conn = get_cache_connection()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS file_cache (
+            file_path TEXT PRIMARY KEY,
+            metadata TEXT,
+            acoustid TEXT,
+            mtime REAL
+        )
+    ''')
+    conn.commit()
 
 def get_cached_data(file_path):
-    with sqlite3.connect(CACHE_DB) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT metadata, acoustid, mtime FROM file_cache WHERE file_path = ?', (file_path,))
-        result = cursor.fetchone()
-        if result:
-            metadata_str, acoustid_rid, mtime = result
-            try:
-                metadata = json.loads(metadata_str)
-                return metadata, acoustid_rid, mtime
-            except json.JSONDecodeError:
-                logging.warning(f"Corrupted metadata in cache for {file_path}, ignoring.")
-                return None, None, None
-        return None, None, None
+    conn = get_cache_connection()
+    cursor = conn.execute('SELECT metadata, acoustid, mtime FROM file_cache WHERE file_path = ?', (file_path,))
+    result = cursor.fetchone()
+    if result:
+        metadata_str, acoustid_rid, mtime = result
+        try:
+            metadata = json.loads(metadata_str)
+            return metadata, acoustid_rid, mtime
+        except json.JSONDecodeError:
+            logging.warning(f"Corrupted metadata in cache for {file_path}, ignoring.")
+            return None, None, None
+    return None, None, None
 
 def update_cache(file_path, metadata, acoustid_rid, mtime):
-    with sqlite3.connect(CACHE_DB) as conn:
-        cursor = conn.cursor()
-        metadata_str = json.dumps(metadata)
-        cursor.execute('''
-            REPLACE INTO file_cache (file_path, metadata, acoustid, mtime)
-            VALUES (?, ?, ?, ?)
-        ''', (file_path, metadata_str, acoustid_rid, mtime))
-        conn.commit()
+    conn = get_cache_connection()
+    metadata_str = json.dumps(metadata)
+    conn.execute('''
+        REPLACE INTO file_cache (file_path, metadata, acoustid, mtime)
+        VALUES (?, ?, ?, ?)
+    ''', (file_path, metadata_str, acoustid_rid, mtime))
+    conn.commit()
 
 def clear_cache():
-    with sqlite3.connect(CACHE_DB) as conn:
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM file_cache')
-        conn.commit()
-        logging.info("Cache cleared.")
+    conn = get_cache_connection()
+    conn.execute('DELETE FROM file_cache')
+    conn.commit()
+    logging.info("Cache cleared.")
 
 def validate_cached_data(file_path):
     file_mtime = os.path.getmtime(file_path)
     cached_metadata, acoustid_rid, cached_mtime = get_cached_data(file_path)
-    if cached_mtime == file_mtime and cached_metadata is not None:
+    if int(cached_mtime) == int(file_mtime) and cached_metadata is not None:
         return cached_metadata, acoustid_rid
     else:
         metadata = get_file_metadata(file_path, revalidate=True)
@@ -180,7 +208,7 @@ def get_file_metadata(file_path, revalidate=False):
         update_cache(file_path, file_metadata, None, file_metadata['mtime'])
         return file_metadata
 
-    except (FileNotFoundError, Exception) as e:
+    except (FileNotFoundError, PermissionError, ValueError) as e:
         logging.error(f"Failed to get metadata for {file_path}: {e}")
         return None
 
@@ -203,7 +231,7 @@ def get_acoustid(file_path, revalidate=False):
         results = response.get('results', [])
         best_result = max(results, key=lambda x: (x.get('score', 0), len(x.get('recordings', []))), default=None) if results else None
         if not best_result:
-          return None
+            return None
         recordings = best_result.get('recordings', [])
         best_recording = None
         best_score = -1
@@ -222,11 +250,12 @@ def get_acoustid(file_path, revalidate=False):
 
         _, _, cached_mtime = get_cached_data(file_path)
         if cached_mtime is None:
-          cached_mtime = os.path.getmtime(file_path)
+            cached_mtime = os.path.getmtime(file_path)
         update_cache(file_path, metadata, rid, cached_mtime)
         return rid
 
-    except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError,
+            json.JSONDecodeError, KeyError) as e:
         logging.error(f"AcoustID processing failed for {file_path}: {e}")
         return None
 
@@ -246,61 +275,104 @@ def process_file_acoustid(file_path):
 def calculate_directory_hash(directory):
     """Calculates a hash representing the contents of a directory."""
     hashes = []
+    music_files = []
     for root, _, files in os.walk(directory):
-        for file in sorted(files):  # Sort files for consistent hashing
+        for file in sorted(files):
             if file.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
-                file_path = os.path.join(root, file)
-                metadata, acoustid_rid = validate_cached_data(file_path)
+                music_files.append(os.path.join(root, file))
 
-                # Use AcoustID if available, otherwise fall back to metadata
-                if acoustid_rid:
-                    hashes.append(acoustid_rid)
-                elif metadata:
-                    # Create a string representation of the relevant metadata
-                    metadata_str = f"{metadata.get('artist','')}-{metadata.get('title','')}-{metadata.get('album','')}"
-                    hashes.append(metadata_str)
+    for file_path in music_files:
+        metadata, acoustid_rid = validate_cached_data(file_path)
+        if acoustid_rid:
+            hashes.append(acoustid_rid)
+        elif metadata:
+            metadata_str = f"{metadata.get('artist','')}-{metadata.get('title','')}-{metadata.get('album','')}"
+            hashes.append(metadata_str)
 
-    # Combine the hashes (or strings) into a single string and hash that
-    combined_string = ''.join(sorted(hashes)) # sort to ensure consistent hash
+    combined_string = ''.join(sorted(hashes))
     return hashlib.sha256(combined_string.encode('utf-8')).hexdigest()
 
+def _worker_init():
+    """Initialize per-worker SQLite connection for multiprocessing."""
+    global _cache_conn
+    _cache_conn = sqlite3.connect(CACHE_DB)
 
-def find_duplicates(directory, verbose=False, use_multiprocessing=True):
+def _calculate_hash_worker(dir_path):
+    """Worker function for multiprocessing directory hash calculation."""
+    try:
+        dir_hash = calculate_directory_hash(dir_path)
+        music_files = []
+        for root, _, files in os.walk(dir_path):
+            for f in files:
+                if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS)):
+                    music_files.append(os.path.join(root, f))
+        return (dir_path, dir_hash, len(music_files))
+    except Exception as e:
+        logging.error(f"Error processing directory {dir_path}: {e}")
+        return None
+
+def find_duplicates(directory, verbose=False, use_multiprocessing=True, batch_size=1000):
     """Finds duplicate directories based on content hashes."""
     dir_hashes = {}
     duplicates = []
     init_cache_db()
 
-    # First, calculate hashes for all directories containing music files
+    # Collect all directories containing music files
+    music_dirs = []
     for root, _, files in os.walk(directory):
-        has_music_files = any(file.lower().endswith(tuple(SUPPORTED_EXTENSIONS)) for file in files)
-        if has_music_files:
-            dir_hash = calculate_directory_hash(root)
-            if dir_hash:  # Ensure we have a valid hash
-                dir_hashes.setdefault(dir_hash, []).append(os.path.abspath(root))
-                summary_stats['total_files_processed'] += len([f for f in files if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))])
+        if any(f.lower().endswith(tuple(SUPPORTED_EXTENSIONS)) for f in files):
+            music_dirs.append(root)
+
+    if not music_dirs:
+        return duplicates
+
+    total_batches = (len(music_dirs) + batch_size - 1) // batch_size
+    logging.info(f"Found {len(music_dirs)} directories to scan ({total_batches} batch(es) of {batch_size})")
+
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(music_dirs))
+        batch = music_dirs[batch_start:batch_end]
+
+        if total_batches > 1:
+            logging.info(f"Processing batch {batch_idx + 1}/{total_batches} ({len(batch)} directories)")
+
+        if use_multiprocessing:
+            num_workers = min(cpu_count(), 2)  # Cap at 2 to respect API rate limits
+            with Pool(processes=num_workers, initializer=_worker_init) as pool:
+                results = list(tqdm(
+                    pool.imap_unordered(_calculate_hash_worker, batch),
+                    total=len(batch),
+                    desc=f"Scanning directories",
+                    disable=not verbose
+                ))
+        else:
+            results = []
+            for dir_path in tqdm(batch, desc="Scanning directories", disable=not verbose):
+                dir_hash = calculate_directory_hash(dir_path)
+                music_files = [f for f in os.listdir(dir_path)
+                              if f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))]
+                results.append((dir_path, dir_hash, len(music_files)))
+
+        for result in results:
+            if result:
+                dir_path, dir_hash, file_count = result
+                if dir_hash:
+                    dir_hashes.setdefault(dir_hash, []).append(os.path.abspath(dir_path))
+                    summary_stats['total_files_processed'] += file_count
 
     # Identify duplicate directories (those with the same hash)
     for hash_value, dir_list in dir_hashes.items():
         if len(dir_list) > 1:
             duplicates.append(dir_list)
-            summary_stats['total_duplicates_found'] += len(dir_list) -1 # Correct count
+            summary_stats['total_duplicates_found'] += len(dir_list) - 1
 
     return duplicates
 
 
-summary_stats = {
-    'total_files_processed': 0,
-    'total_duplicates_found': 0,
-    'total_files_to_remove': 0,
-    'total_storage_to_save': 0,
-    'files_by_format': {},
-    'total_acoustid_lookups': 0  # This might not be accurate anymore, consider removing
-}
-
 def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run):
     """Resolves duplicates (list, move, delete) - directory-based and intra-directory."""
-    for duplicate_set in duplicates:
+    for duplicate_set in tqdm(duplicates, desc="Resolving duplicates", disable=not verbose):
         # 1. Determine the best directory to keep (prioritize FLAC and largest total size).
         best_dir = None
         best_dir_size = -1
@@ -354,13 +426,12 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
             if not dry_run:
                 delete_duplicates(dirs_to_remove)
             else:
-                 logging.info(f"[DRY RUN] Would delete directories: {dirs_to_remove}")
+                logging.info(f"[DRY RUN] Would delete directories: {dirs_to_remove}")
 
-        # 5. Intra-directory duplicate detection and handling (within EACH directory of the duplicate set).
-        for dir_path in duplicate_set:  # Iterate through ALL directories in the set
+        # 5. Intra-directory duplicate detection within the kept directory.
+        for dir_path in [best_dir]:
             if not os.path.exists(dir_path):
-                logging.warning(f"Skipping intra-directory check for non-existent path: {dir_path}")
-                continue #skip if it doesn't exist
+                continue
 
             files_in_dir = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))]
             acoustid_map = {}
@@ -428,20 +499,20 @@ def move_duplicates(dirs_to_remove, original_dir, move_dir, base_dir):
 
         if not os.path.exists(target_path):
             os.makedirs(target_path)
-        #Move files individually
+        # Move files individually
         for item in os.listdir(dir_path):
-          s = os.path.join(dir_path, item)
-          d = os.path.join(target_path, item)
-          if os.path.isfile(s):
-            shutil.move(s, d)
-            logging.info(f"Moved {s} to {d}")
-          elif os.path.isdir(s): #shouldn't happen, but check
-            logging.warning(f"Unexpected directory {s} within duplicate directory.")
+            s = os.path.join(dir_path, item)
+            d = os.path.join(target_path, item)
+            if os.path.isfile(s):
+                shutil.move(s, d)
+                logging.info(f"Moved {s} to {d}")
+            elif os.path.isdir(s):
+                logging.warning(f"Unexpected directory {s} within duplicate directory.")
 
         # Clean up empty directory after moving files
         if not os.listdir(dir_path):
-          os.rmdir(dir_path)
-          logging.info(f"Removed empty directory {dir_path}")
+            os.rmdir(dir_path)
+            logging.info(f"Removed empty directory {dir_path}")
 
 
 
@@ -476,6 +547,7 @@ def main():
     parser.add_argument('--no-multiprocessing', action='store_true', help="Disable multiprocessing.")
     parser.add_argument('--dry-run', action='store_true', help="Perform a dry run without modifying files.")
     parser.add_argument('--clear-cache', action='store_true', help="Clear the cache database before running.")
+    parser.add_argument('-y', '--yes', action='store_true', help="Skip confirmation prompt for destructive actions.")
 
     args = parser.parse_args()
 
@@ -485,6 +557,11 @@ def main():
         return
 
     setup_logging(log_level)
+    load_or_prompt_config()
+
+    if not os.path.isdir(args.path):
+        logging.error(f"Path does not exist or is not a directory: {args.path}")
+        sys.exit(1)
 
     if args.action == 'move' and not args.move_dir:
         parser.error("--move-dir is required when action is 'move'")
@@ -500,10 +577,17 @@ def main():
     logging.info("Starting music deduplication process...")
     logging.info(f"Scanning directory: {args.path}")
 
-    duplicates = find_duplicates(args.path, verbose=args.verbose, use_multiprocessing=not args.no_multiprocessing)
+    duplicates = find_duplicates(args.path, verbose=args.verbose,
+                                  use_multiprocessing=not args.no_multiprocessing,
+                                  batch_size=BATCH_SIZE)
 
     if duplicates:
         logging.info(f"Found {len(duplicates)} sets of duplicate directories.")
+        if args.action == 'delete' and not args.dry_run and not args.yes:
+            confirm = input(f"WARNING: This will permanently delete {len(duplicates)} sets of duplicate directories. Type 'yes' to confirm: ")
+            if confirm.strip().lower() != 'yes':
+                logging.info("Delete operation cancelled by user.")
+                sys.exit(0)
         resolve_duplicates(duplicates, args.action, args.move_dir, base_dir=os.path.abspath(args.path), verbose=args.verbose, dry_run=args.dry_run)
     else:
         logging.info("No duplicates found.")
@@ -512,6 +596,7 @@ def main():
     total_time = time.time() - start_time
     logging.info(f"\nCompleted in {total_time:.2f} seconds.")
     display_summary()
+    close_cache_connection()
 
 if __name__ == "__main__":
     main()

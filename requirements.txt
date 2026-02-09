@@ -1,0 +1,7 @@
+acoustid>=1.2.2
+mutagen>=1.47.0
+fuzzywuzzy[speedup]>=0.18.0
+python-Levenshtein>=0.21.0
+tqdm>=4.66.0
+pyacoustid>=1.3.0
+ratelimit>=2.2.1
