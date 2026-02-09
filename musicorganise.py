@@ -21,6 +21,14 @@ import hashlib
 CONFIG_FILE = 'config.json'
 CACHE_DB = 'file_cache.db'
 
+summary_stats = {
+    'total_files_processed': 0,
+    'total_duplicates_found': 0,
+    'total_files_to_remove': 0,
+    'total_storage_to_save': 0,
+    'files_by_format': {},
+}
+
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -31,39 +39,54 @@ def save_config(config):
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
 
-# Load configuration parameters
-config = load_config()
-ACOUSTID_API_KEY = config.get('acoustid_api_key', None)
-FUZZY_THRESHOLD = config.get('fuzzy_threshold', 90)
-BATCH_SIZE = config.get('batch_size', 1000)
-SUPPORTED_EXTENSIONS = config.get('supported_extensions', ['.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac'])
+# Module-level config globals (populated by load_or_prompt_config())
+ACOUSTID_API_KEY = None
+FUZZY_THRESHOLD = 90
+BATCH_SIZE = 1000
+SUPPORTED_EXTENSIONS = ['.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac']
 
-if not ACOUSTID_API_KEY:
-    ACOUSTID_API_KEY = input("Please enter your AcoustID API key: ").strip()
-    config['acoustid_api_key'] = ACOUSTID_API_KEY
-    save_config(config)
+def load_or_prompt_config(interactive=True):
+    """Load configuration from file, prompting for missing values if interactive."""
+    global ACOUSTID_API_KEY, FUZZY_THRESHOLD, BATCH_SIZE, SUPPORTED_EXTENSIONS
 
-if 'fuzzy_threshold' not in config:
-    try:
-        FUZZY_THRESHOLD = int(input("Please enter the fuzzy match threshold (default is 90): ").strip() or 90)
-    except ValueError:
-        FUZZY_THRESHOLD = 90
-    config['fuzzy_threshold'] = FUZZY_THRESHOLD
-    save_config(config)
+    config = load_config()
+    ACOUSTID_API_KEY = config.get('acoustid_api_key', None)
+    FUZZY_THRESHOLD = config.get('fuzzy_threshold', 90)
+    BATCH_SIZE = config.get('batch_size', 1000)
+    SUPPORTED_EXTENSIONS = config.get('supported_extensions', ['.mp3', '.flac', '.ogg', '.wav', '.m4a', '.aac'])
 
-if BATCH_SIZE is None:
-    try:
-        BATCH_SIZE = int(input("Please enter the batch size for processing files (default is 1000): ").strip() or 1000)
-    except ValueError:
-        BATCH_SIZE = 1000
-    config['batch_size'] = BATCH_SIZE
-    save_config(config)
+    if not ACOUSTID_API_KEY:
+        if not interactive:
+            logging.error("AcoustID API key not found in config.json. Run interactively or add 'acoustid_api_key' to config.json.")
+            sys.exit(1)
+        ACOUSTID_API_KEY = input("Please enter your AcoustID API key: ").strip()
+        config['acoustid_api_key'] = ACOUSTID_API_KEY
+        save_config(config)
 
-if 'supported_extensions' not in config:
-    ext_input = input("Please enter the supported file extensions (comma-separated, default is .mp3,.flac,.ogg,.wav,.m4a,.aac): ").strip()
-    SUPPORTED_EXTENSIONS = [ext.strip().lower() for ext in (ext_input or '.mp3,.flac,.ogg,.wav,.m4a,.aac').split(',')]
-    config['supported_extensions'] = SUPPORTED_EXTENSIONS
-    save_config(config)
+    if 'fuzzy_threshold' not in config:
+        if interactive:
+            try:
+                FUZZY_THRESHOLD = int(input("Please enter the fuzzy match threshold (default is 90): ").strip() or 90)
+            except ValueError:
+                FUZZY_THRESHOLD = 90
+        config['fuzzy_threshold'] = FUZZY_THRESHOLD
+        save_config(config)
+
+    if 'batch_size' not in config:
+        if interactive:
+            try:
+                BATCH_SIZE = int(input("Please enter the batch size for processing files (default is 1000): ").strip() or 1000)
+            except ValueError:
+                BATCH_SIZE = 1000
+        config['batch_size'] = BATCH_SIZE
+        save_config(config)
+
+    if 'supported_extensions' not in config:
+        if interactive:
+            ext_input = input("Please enter the supported file extensions (comma-separated, default is .mp3,.flac,.ogg,.wav,.m4a,.aac): ").strip()
+            SUPPORTED_EXTENSIONS = [ext.strip().lower() for ext in (ext_input or '.mp3,.flac,.ogg,.wav,.m4a,.aac').split(',')]
+        config['supported_extensions'] = SUPPORTED_EXTENSIONS
+        save_config(config)
 
 def setup_logging(log_level):
     logger = logging.getLogger()
@@ -203,7 +226,7 @@ def get_acoustid(file_path, revalidate=False):
         results = response.get('results', [])
         best_result = max(results, key=lambda x: (x.get('score', 0), len(x.get('recordings', []))), default=None) if results else None
         if not best_result:
-          return None
+            return None
         recordings = best_result.get('recordings', [])
         best_recording = None
         best_score = -1
@@ -222,7 +245,7 @@ def get_acoustid(file_path, revalidate=False):
 
         _, _, cached_mtime = get_cached_data(file_path)
         if cached_mtime is None:
-          cached_mtime = os.path.getmtime(file_path)
+            cached_mtime = os.path.getmtime(file_path)
         update_cache(file_path, metadata, rid, cached_mtime)
         return rid
 
@@ -289,15 +312,6 @@ def find_duplicates(directory, verbose=False, use_multiprocessing=True):
     return duplicates
 
 
-summary_stats = {
-    'total_files_processed': 0,
-    'total_duplicates_found': 0,
-    'total_files_to_remove': 0,
-    'total_storage_to_save': 0,
-    'files_by_format': {},
-    'total_acoustid_lookups': 0  # This might not be accurate anymore, consider removing
-}
-
 def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run):
     """Resolves duplicates (list, move, delete) - directory-based and intra-directory."""
     for duplicate_set in duplicates:
@@ -354,7 +368,7 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
             if not dry_run:
                 delete_duplicates(dirs_to_remove)
             else:
-                 logging.info(f"[DRY RUN] Would delete directories: {dirs_to_remove}")
+                logging.info(f"[DRY RUN] Would delete directories: {dirs_to_remove}")
 
         # 5. Intra-directory duplicate detection and handling (within EACH directory of the duplicate set).
         for dir_path in duplicate_set:  # Iterate through ALL directories in the set
@@ -428,20 +442,20 @@ def move_duplicates(dirs_to_remove, original_dir, move_dir, base_dir):
 
         if not os.path.exists(target_path):
             os.makedirs(target_path)
-        #Move files individually
+        # Move files individually
         for item in os.listdir(dir_path):
-          s = os.path.join(dir_path, item)
-          d = os.path.join(target_path, item)
-          if os.path.isfile(s):
-            shutil.move(s, d)
-            logging.info(f"Moved {s} to {d}")
-          elif os.path.isdir(s): #shouldn't happen, but check
-            logging.warning(f"Unexpected directory {s} within duplicate directory.")
+            s = os.path.join(dir_path, item)
+            d = os.path.join(target_path, item)
+            if os.path.isfile(s):
+                shutil.move(s, d)
+                logging.info(f"Moved {s} to {d}")
+            elif os.path.isdir(s):
+                logging.warning(f"Unexpected directory {s} within duplicate directory.")
 
         # Clean up empty directory after moving files
         if not os.listdir(dir_path):
-          os.rmdir(dir_path)
-          logging.info(f"Removed empty directory {dir_path}")
+            os.rmdir(dir_path)
+            logging.info(f"Removed empty directory {dir_path}")
 
 
 
@@ -485,6 +499,7 @@ def main():
         return
 
     setup_logging(log_level)
+    load_or_prompt_config()
 
     if args.action == 'move' and not args.move_dir:
         parser.error("--move-dir is required when action is 'move'")
