@@ -14,9 +14,10 @@ from ratelimit import limits, sleep_and_retry
 import sqlite3
 import hashlib
 
-# Configuration file and cache database file
-CONFIG_FILE = 'config.json'
-CACHE_DB = 'file_cache.db'
+# Configuration file and cache database file (anchored to script directory)
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(_SCRIPT_DIR, 'config.json')
+CACHE_DB = os.path.join(_SCRIPT_DIR, 'file_cache.db')
 
 summary_stats = {
     'total_files_processed': 0,
@@ -88,7 +89,7 @@ def load_or_prompt_config(interactive=True):
 def setup_logging(log_level):
     logger = logging.getLogger()
     logger.setLevel(log_level)
-    fh = logging.FileHandler('music_deduplicate.log', encoding='utf-8')
+    fh = logging.FileHandler(os.path.join(_SCRIPT_DIR, 'music_deduplicate.log'), encoding='utf-8')
     fh.setLevel(logging.DEBUG)
     ch = logging.StreamHandler()
     ch.setLevel(log_level)
@@ -112,55 +113,68 @@ def check_fpcalc():
 def acoustid_lookup(api_key, fingerprint, duration):
     return acoustid.lookup(api_key, fingerprint, duration, meta='recordings artists')
 
+# SQLite connection singleton
+_cache_conn = None
+
+def get_cache_connection():
+    """Get or create the shared SQLite connection."""
+    global _cache_conn
+    if _cache_conn is None:
+        _cache_conn = sqlite3.connect(CACHE_DB)
+    return _cache_conn
+
+def close_cache_connection():
+    """Close the shared SQLite connection."""
+    global _cache_conn
+    if _cache_conn:
+        _cache_conn.close()
+        _cache_conn = None
+
 def init_cache_db():
-    with sqlite3.connect(CACHE_DB) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS file_cache (
-                file_path TEXT PRIMARY KEY,
-                metadata TEXT,
-                acoustid TEXT,
-                mtime REAL
-            )
-        ''')
-        conn.commit()
+    conn = get_cache_connection()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS file_cache (
+            file_path TEXT PRIMARY KEY,
+            metadata TEXT,
+            acoustid TEXT,
+            mtime REAL
+        )
+    ''')
+    conn.commit()
 
 def get_cached_data(file_path):
-    with sqlite3.connect(CACHE_DB) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT metadata, acoustid, mtime FROM file_cache WHERE file_path = ?', (file_path,))
-        result = cursor.fetchone()
-        if result:
-            metadata_str, acoustid_rid, mtime = result
-            try:
-                metadata = json.loads(metadata_str)
-                return metadata, acoustid_rid, mtime
-            except json.JSONDecodeError:
-                logging.warning(f"Corrupted metadata in cache for {file_path}, ignoring.")
-                return None, None, None
-        return None, None, None
+    conn = get_cache_connection()
+    cursor = conn.execute('SELECT metadata, acoustid, mtime FROM file_cache WHERE file_path = ?', (file_path,))
+    result = cursor.fetchone()
+    if result:
+        metadata_str, acoustid_rid, mtime = result
+        try:
+            metadata = json.loads(metadata_str)
+            return metadata, acoustid_rid, mtime
+        except json.JSONDecodeError:
+            logging.warning(f"Corrupted metadata in cache for {file_path}, ignoring.")
+            return None, None, None
+    return None, None, None
 
 def update_cache(file_path, metadata, acoustid_rid, mtime):
-    with sqlite3.connect(CACHE_DB) as conn:
-        cursor = conn.cursor()
-        metadata_str = json.dumps(metadata)
-        cursor.execute('''
-            REPLACE INTO file_cache (file_path, metadata, acoustid, mtime)
-            VALUES (?, ?, ?, ?)
-        ''', (file_path, metadata_str, acoustid_rid, mtime))
-        conn.commit()
+    conn = get_cache_connection()
+    metadata_str = json.dumps(metadata)
+    conn.execute('''
+        REPLACE INTO file_cache (file_path, metadata, acoustid, mtime)
+        VALUES (?, ?, ?, ?)
+    ''', (file_path, metadata_str, acoustid_rid, mtime))
+    conn.commit()
 
 def clear_cache():
-    with sqlite3.connect(CACHE_DB) as conn:
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM file_cache')
-        conn.commit()
-        logging.info("Cache cleared.")
+    conn = get_cache_connection()
+    conn.execute('DELETE FROM file_cache')
+    conn.commit()
+    logging.info("Cache cleared.")
 
 def validate_cached_data(file_path):
     file_mtime = os.path.getmtime(file_path)
     cached_metadata, acoustid_rid, cached_mtime = get_cached_data(file_path)
-    if cached_mtime == file_mtime and cached_metadata is not None:
+    if int(cached_mtime) == int(file_mtime) and cached_metadata is not None:
         return cached_metadata, acoustid_rid
     else:
         metadata = get_file_metadata(file_path, revalidate=True)
@@ -193,7 +207,7 @@ def get_file_metadata(file_path, revalidate=False):
         update_cache(file_path, file_metadata, None, file_metadata['mtime'])
         return file_metadata
 
-    except (FileNotFoundError, Exception) as e:
+    except (FileNotFoundError, PermissionError, ValueError) as e:
         logging.error(f"Failed to get metadata for {file_path}: {e}")
         return None
 
@@ -239,7 +253,8 @@ def get_acoustid(file_path, revalidate=False):
         update_cache(file_path, metadata, rid, cached_mtime)
         return rid
 
-    except (FileNotFoundError, subprocess.CalledProcessError, Exception) as e:
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError,
+            json.JSONDecodeError, KeyError) as e:
         logging.error(f"AcoustID processing failed for {file_path}: {e}")
         return None
 
@@ -360,11 +375,10 @@ def resolve_duplicates(duplicates, action, move_dir, base_dir, verbose, dry_run)
             else:
                 logging.info(f"[DRY RUN] Would delete directories: {dirs_to_remove}")
 
-        # 5. Intra-directory duplicate detection and handling (within EACH directory of the duplicate set).
-        for dir_path in duplicate_set:  # Iterate through ALL directories in the set
+        # 5. Intra-directory duplicate detection within the kept directory.
+        for dir_path in [best_dir]:
             if not os.path.exists(dir_path):
-                logging.warning(f"Skipping intra-directory check for non-existent path: {dir_path}")
-                continue #skip if it doesn't exist
+                continue
 
             files_in_dir = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and f.lower().endswith(tuple(SUPPORTED_EXTENSIONS))]
             acoustid_map = {}
@@ -480,6 +494,7 @@ def main():
     parser.add_argument('--no-multiprocessing', action='store_true', help="Disable multiprocessing.")
     parser.add_argument('--dry-run', action='store_true', help="Perform a dry run without modifying files.")
     parser.add_argument('--clear-cache', action='store_true', help="Clear the cache database before running.")
+    parser.add_argument('-y', '--yes', action='store_true', help="Skip confirmation prompt for destructive actions.")
 
     args = parser.parse_args()
 
@@ -490,6 +505,10 @@ def main():
 
     setup_logging(log_level)
     load_or_prompt_config()
+
+    if not os.path.isdir(args.path):
+        logging.error(f"Path does not exist or is not a directory: {args.path}")
+        sys.exit(1)
 
     if args.action == 'move' and not args.move_dir:
         parser.error("--move-dir is required when action is 'move'")
@@ -509,6 +528,11 @@ def main():
 
     if duplicates:
         logging.info(f"Found {len(duplicates)} sets of duplicate directories.")
+        if args.action == 'delete' and not args.dry_run and not args.yes:
+            confirm = input(f"WARNING: This will permanently delete {len(duplicates)} sets of duplicate directories. Type 'yes' to confirm: ")
+            if confirm.strip().lower() != 'yes':
+                logging.info("Delete operation cancelled by user.")
+                sys.exit(0)
         resolve_duplicates(duplicates, args.action, args.move_dir, base_dir=os.path.abspath(args.path), verbose=args.verbose, dry_run=args.dry_run)
     else:
         logging.info("No duplicates found.")
@@ -517,6 +541,7 @@ def main():
     total_time = time.time() - start_time
     logging.info(f"\nCompleted in {total_time:.2f} seconds.")
     display_summary()
+    close_cache_connection()
 
 if __name__ == "__main__":
     main()
