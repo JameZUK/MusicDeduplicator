@@ -21,6 +21,37 @@ by trusting file names or tags, then remove the duplicates safely.
   files and NAS metadata folders are handled. A folder holding anything unreadable
   is never removed.
 
+## Screenshots
+
+All of these show a demo library of invented bands with synthesised music.
+
+**Overview:** your collection at a glance, and everything the scan found.
+
+![Overview: track count, size, quality split, editions kept intact, edited versions and unreadable files](docs/screenshots/overview.png)
+
+**Reviewing a duplicate:** the copy kept (24-bit/96 kHz) and the copies to remove, side by side.
+The patch bay links every track to its match; ▶ plays a pair so you can listen to both.
+
+![Review screen: album cards marked keep and remove, and a patch bay linking matching tracks](docs/screenshots/review.png)
+
+**Comparing an edited version:** the clean copy (A) has a line muted. Both waveforms sit on one
+timeline, and the red stretch between them shows exactly where they differ. Playback switches
+between A and B instantly without losing your place.
+
+![Comparison of explicit and clean versions: aligned waveforms with the edit highlighted in red](docs/screenshots/compare-edit.png)
+
+**Comparing the same audio in two formats:** a hi-res FLAC and a 320 kbps MP3 line up bar for bar.
+
+![Comparison of a hi-res FLAC and an MP3 of the same track: identical waveforms, no differences](docs/screenshots/compare-same.png)
+
+**Deciding in bulk:** every group in a list, with the quality kept and removed, ready to accept together.
+
+![Bulk list with checkboxes, the quality kept and removed, and space freed per group](docs/screenshots/bulk.png)
+
+**Light theme:**
+
+![The review screen in the light theme](docs/screenshots/review-light.png)
+
 ## Install
 
 You need Python 3.10 or newer and `fpcalc` from Chromaprint.

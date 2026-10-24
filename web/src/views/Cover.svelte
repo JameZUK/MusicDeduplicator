@@ -24,9 +24,10 @@
   img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .label {
     width: 100%; height: 100%; display: grid; place-items: center;
+    /* A record: grooves, and a centre label carrying the initials. Same in both themes. */
     background:
-      radial-gradient(circle at 50% 50%, var(--panel) 0 14%, transparent 15%),
-      repeating-radial-gradient(circle at 50% 50%, hsl(var(--h) 25% 18%) 0 2px, hsl(var(--h) 25% 22%) 2px 4px);
+      radial-gradient(circle at 50% 50%, hsl(var(--h) 45% 32%) 0 30%, hsl(var(--h) 25% 12%) 31% 33%, transparent 34%),
+      repeating-radial-gradient(circle at 50% 50%, hsl(var(--h) 20% 14%) 0 2px, hsl(var(--h) 20% 19%) 2px 4px);
   }
-  .label span { font-family: var(--font-display); color: hsl(var(--h) 60% 75%); font-size: 1.1em; mix-blend-mode: screen; }
+  .label span { font-family: var(--font-display); color: hsl(var(--h) 70% 88%); font-size: 1.05em; letter-spacing: .02em; }
 </style>

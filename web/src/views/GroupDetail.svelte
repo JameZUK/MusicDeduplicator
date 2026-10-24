@@ -134,7 +134,7 @@
   }
   .keeper .stamp { color: var(--keep); transform: rotate(-3deg); }
   .top { display: flex; gap: 12px; min-width: 0; }
-  .info { min-width: 0; display: flex; flex-direction: column; gap: 6px; padding-right: 50px; }
+  .info { min-width: 0; display: flex; flex-direction: column; gap: 6px; padding-right: 72px; }
   .path { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
   .line { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; }
   .dim { color: var(--ink-3); }

@@ -105,7 +105,7 @@
       <span>·</span>
       <span>{store.session.user ? `signed in as ${store.session.user}` : 'LAN access, no login'}</span>
       <span>·</span>
-      <span class="mono path">{store.session.plan_path}</span>
+      <span class="mono path" title={store.session.plan_path}>{store.session.plan_path.split('/').pop()}</span>
     {/if}
   </footer>
 </div>

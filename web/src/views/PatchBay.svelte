@@ -75,9 +75,7 @@
         {@const c = cables.find((x) => x.j === j)}
         <li class:dim={!matchedRight.has(j)} class:lit={hover?.j === j}>
           {#if c}
-            <button class="listen" class:on={isPlaying(c)} onclick={() => listen(c)}
-              aria-label={isPlaying(c) ? 'Pause' : `Play ${title(t)} and its kept copy`}>{isPlaying(c) ? '❚❚' : '▶'}</button>
-            <button class="row" onmouseenter={() => (hover = c)} onmouseleave={() => (hover = null)}
+<button class="row" onmouseenter={() => (hover = c)} onmouseleave={() => (hover = null)}
               onfocus={() => (hover = c)} onblur={() => (hover = null)} onclick={() => open(c)}
               title="Compare these two tracks">
               <span class="no mono">{t.track || '·'}</span>
@@ -85,6 +83,8 @@
               <span class="dur mono">{time(t.duration)}</span>
               <Quality track={t} />
             </button>
+            <button class="listen" class:on={isPlaying(c)} onclick={() => listen(c)}
+              aria-label={isPlaying(c) ? 'Pause' : `Play ${title(t)} and its kept copy`}>{isPlaying(c) ? '❚❚' : '▶'}</button>
           {:else}
             <span class="no mono">{t.track || '·'}</span>
             <span class="title">{title(t)}</span>
@@ -112,7 +112,7 @@
     height: var(--row); display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; gap: 10px; align-items: center;
     padding: 0 8px; border-radius: 5px; font-size: 13.5px; transition: background .12s, opacity .12s;
   }
-  li:has(.row) { padding: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 0; }
+  li:has(.row) { padding: 0; display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 0; align-items: center; }
   .listen { all: unset; cursor: pointer; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
     font-size: 10px; color: var(--ink-3); border: 1px solid var(--line); align-self: center; }
   .listen:hover, .listen.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
