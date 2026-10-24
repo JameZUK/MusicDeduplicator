@@ -1,235 +1,186 @@
-# Music Deduplication Tool
+# MusicDeduplicator
 
-## Overview
+Find duplicate albums and tracks in a music library by **listening to them**, not
+by trusting file names or tags, then remove the duplicates safely.
 
-The **Music Deduplication Tool** is a Python script designed to help you manage and clean up your music library by identifying and handling duplicate audio files. It scans your music directories, detects duplicates using metadata analysis and audio fingerprinting with AcoustID, and allows you to either list, move, or delete the duplicates based on your preference.
+- **Compares the audio itself.** Every file is fingerprinted with Chromaprint and
+  compared locally, so a FLAC and an MP3 of the same album match, and so do
+  copies with different or missing tags. No account, API key or internet access
+  is needed.
+- **Keeps the best copy.** Lossless beats lossy, hi-res beats CD quality, higher
+  bitrate beats lower. A copy is only removed if one of equal or better quality is kept.
+- **Keeps releases intact.** Tracks are never taken out of an album you keep. A
+  standard album isn't removed just because the deluxe edition contains it, a track
+  an album repeats on purpose stays, and explicit and clean versions are never
+  treated as duplicates. The tool finds exactly where they differ.
+- **Never acts without a plan you can review.** `scan` changes nothing. It writes a
+  plan saying what it would remove and which copy it keeps instead. `apply` re-checks
+  every file before touching it, moves rather than deletes by default, and records
+  everything so you can undo it.
+- **Copes with messy libraries.** Corrupt files, symlinks, hard links, macOS `._`
+  files and NAS metadata folders are handled. A folder holding anything unreadable
+  is never removed.
 
-## Features
+## Install
 
-- **Metadata Analysis with Fuzzy Matching**: Quickly identifies potential duplicates by comparing metadata (artist, title, album) using fuzzy string matching.
-- **Audio Fingerprinting with AcoustID**: Utilizes AcoustID and the Chromaprint library to accurately identify audio duplicates, even if file metadata differs or is missing.
-- **Batch Processing**: Processes directories in configurable batches (default 1000) to optimize resource usage and prevent system overload.
-- **Multiprocessing Support**: Uses a process pool (capped at 2 workers to respect API rate limits) to speed up directory scanning. Can be disabled with `--no-multiprocessing`.
-- **Progress Bar**: Displays real-time progress bars using `tqdm` when `--verbose` is enabled.
-- **Caching Mechanism**: Caches file metadata and AcoustID fingerprints in a local SQLite database (`file_cache.db`) to improve performance on subsequent runs.
-- **Customizable Actions**: Supports listing, moving, or deleting duplicates based on user selection.
-- **Logging Functionality**: Detailed logging with configurable log levels, stored in `music_deduplicate.log`.
-- **Configurable Parameters**: Batch size, fuzzy match threshold, and other settings are configurable via `config.json`.
-- **Dry Run Mode**: Test what would happen without modifying any files using `--dry-run`.
-- **Safety Confirmation**: Destructive `delete` action requires confirmation (bypass with `--yes`).
-
-## Installation
-
-### Prerequisites
-
-- **Python 3.6 or higher**
-- **pip** (Python package installer)
-
-### Required Python Libraries
-
-Install the required Python libraries using pip:
+You need Python 3.10 or newer and `fpcalc` from Chromaprint.
 
 ```bash
-pip install -r requirements.txt
+# 1. fpcalc
+sudo apt install libchromaprint-tools     # Debian/Ubuntu
+sudo dnf install chromaprint-tools        # Fedora
+sudo pacman -S chromaprint                # Arch
+brew install chromaprint                  # macOS
+# Windows: download fpcalc from https://acoustid.org/chromaprint and put it on your PATH
+
+# 2. musicdedup (pipx keeps it in its own environment)
+pipx install git+https://github.com/JameZUK/MusicDeduplicator.git
 ```
 
-Or install manually:
+If you don't have `pipx`, use a virtual environment. Recent Debian and Ubuntu
+releases refuse a plain `pip install` with an "externally-managed-environment" error.
 
 ```bash
-pip install acoustid mutagen fuzzywuzzy[speedup] tqdm pyacoustid ratelimit
+git clone https://github.com/JameZUK/MusicDeduplicator.git
+cd MusicDeduplicator
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install .
 ```
 
-- **acoustid**: For audio fingerprinting and AcoustID API interaction.
-- **mutagen**: For reading and writing audio metadata.
-- **fuzzywuzzy**: For fuzzy string matching in metadata comparison.
-- **python-Levenshtein**: Installed with `[speedup]` option for faster fuzzy matching.
-- **tqdm**: For displaying progress bars.
-- **ratelimit**: For rate limiting AcoustID API calls.
+## Use it in three steps
 
-### System Dependencies
-
-Install the following system dependencies:
-
-On Debian/Ubuntu-based systems:
+**1. Scan.** This only reads your files.
 
 ```bash
-sudo apt-get update
-sudo apt-get install ffmpeg libchromaprint-tools
+musicdedup scan ~/Music
 ```
 
-- **ffmpeg**: Provides audio decoding capabilities required by some audio processing libraries.
-- **libchromaprint-tools**: Provides `fpcalc`, required by AcoustID for fingerprinting.
+The first scan fingerprints every file, at roughly 0.1 s per track with all CPU
+cores busy. Results are cached, so later scans take seconds. It prints a report and
+writes `musicdedup-plan.json`:
 
-On macOS using Homebrew:
+```
+Duplicate folders: 3 folder(s) duplicate or are contained in another.
+  [1] keep    Artist/Album [24-bit]  (11 tracks)
+      remove  Artist/Album (CD rip)  (same album, 336.8 MB)
+      remove  Downloads/Album  (same album, 298.1 MB)
+  ...
+Kept intact: smaller editions whose tracks are all in a bigger edition ...
+Edited versions (same recording, different somewhere, e.g. explicit/clean): 2 ...
+Audio files that could not be read (possibly corrupt): 4 ...
+
+Plan: remove 25 files (22 audio), freeing 635.0 MB.
+```
+
+**2. Check the plan.** Use the report above, or open `musicdedup-plan.json`. Every
+file to be removed lists the copy kept instead, and why.
+
+**3. Apply it.** Move the duplicates out of your library (recommended), or delete them.
 
 ```bash
-brew install ffmpeg chromaprint
+musicdedup apply musicdedup-plan.json --move-to ~/Duplicates --dry-run   # preview
+musicdedup apply musicdedup-plan.json --move-to ~/Duplicates             # do it
+musicdedup undo ~/Duplicates/musicdedup-journal-20261024-084704.jsonl    # changed your mind
 ```
 
-## Configuration
+`--delete` removes files permanently instead, and asks you to type `delete` to
+confirm. Before acting on each file, `apply` checks that the file and the copy being
+kept both still exist and haven't changed since the scan. Anything that fails a
+check is skipped and listed.
 
-### Obtain an AcoustID API Key
+## What counts as a duplicate
 
-To use the audio fingerprinting feature, you need an AcoustID API key:
+| Situation | What happens |
+|---|---|
+| Two folders with the same audio (any formats, any tags) | The best-quality folder is kept; the others are removed |
+| A folder whose tracks are all in a bigger folder of the **same** edition (an incomplete copy) | Removed |
+| A standard album whose tracks are all on the deluxe edition | **Kept** and reported. Add `--remove-smaller-editions` to remove it |
+| The better copy is the smaller folder (e.g. FLAC album vs MP3 deluxe) | Both kept; nothing of better quality is ever removed |
+| Explicit vs clean, radio edit, any version edited somewhere | Not a duplicate. Reported with the time where they differ |
+| Different mix or remaster with different timing | Not a duplicate |
+| Some tracks shared (compilations, best-ofs, partial overlap) | Both kept. Reported as shared tracks |
+| The same track twice in one folder by accident (FLAC + MP3, `Song (1).flac`, same track number) | Reported. Add `--within-folders` to remove the extra copy |
+| An album that repeats a track on purpose (different track numbers) | Kept intact |
+| A folder containing an unreadable or corrupt audio file | Never removed. Corrupt files are listed |
+| Silence, very short tracks | Never used as evidence of a duplicate on their own |
+| Symlinks, hard links | Ignored (they aren't extra copies) |
 
-1. Register for a free API key at AcoustID API Key Registration.
-2. The script will prompt you for the API key on the first run and store it in `config.json`.
+When several copies are equally good, the tool keeps the copy with more tracks,
+then better quality, then the one under a `--prefer` folder, then the
+shallowest path, then the first alphabetically. The same library always produces
+the same plan.
 
-### Configure Settings
+Only files directly inside a removed folder are removed: its audio plus its
+artwork, `.nfo`, `.cue` and similar files. Subfolders are separate folders with
+their own decision. Artwork is only removed once every audio file in the folder
+has actually gone.
 
-The script uses a configuration file `config.json` to store settings:
+## Options
 
-- **Fuzzy Match Threshold**: Determines how closely metadata must match to be considered duplicates (default is 90).
-- **Batch Size**: Number of directories processed in each batch (default is 1000).
-- **Supported Extensions**: Audio file formats to scan (default: `.mp3`, `.flac`, `.ogg`, `.wav`, `.m4a`, `.aac`).
+```
+musicdedup scan LIBRARY [LIBRARY ...]
+  -o, --plan FILE              where to write the plan (default: musicdedup-plan.json)
+  --prefer FOLDER              keep copies under this folder when copies are equally good (repeatable)
+  --remove-smaller-editions    also remove an edition whose tracks are all in a bigger one
+  --within-folders             also remove accidental duplicate copies inside a folder
+  --exclude PATTERN            skip folders matching a name or relative path pattern (repeatable)
+  --workers N                  parallel fingerprinting jobs (default: number of CPUs)
+  --cache FILE / --no-cache    fingerprint cache (default: ~/.cache/musicdedup/fingerprints.db)
+  --full-report                print every entry instead of the first 25
 
-These settings can be modified directly in `config.json` or will be prompted during the first run if not present.
+musicdedup apply PLAN (--move-to DIR | --delete) [--dry-run] [--yes] [--journal FILE]
+musicdedup undo JOURNAL [--dry-run]
+musicdedup cache info|clear
 
-Example `config.json`:
-
-```json
-{
-    "acoustid_api_key": "YOUR_API_KEY_HERE",
-    "fuzzy_threshold": 90,
-    "batch_size": 1000,
-    "supported_extensions": [".mp3", ".flac", ".ogg", ".wav", ".m4a", ".aac"]
-}
+All commands: -v/--verbose, -q/--quiet, --log-file FILE
 ```
 
-## Usage
+Scanning several folders at once (for example `musicdedup scan ~/Music ~/Downloads
+--prefer ~/Music`) finds duplicates across them. In quarantine, each scanned folder
+gets its own subfolder.
 
-### Running the Script
+Scheduled and unattended runs work: `scan` never prompts, and `apply` refuses to
+proceed without `--yes` when it isn't run from a terminal.
 
-Basic command structure:
+## How it works
+
+1. **Scan.** Walks the folders without following symlinks and fingerprints each audio
+   file with `fpcalc` (the whole track, in parallel). Fingerprints, format and tags are
+   cached, keyed by path, size and modification time to the nanosecond.
+2. **Compare.** Tracks of similar length are compared by aligning their fingerprints
+   and measuring the fraction of differing bits, overall and in 2.5-second windows.
+   - Re-encodes of the same audio differ by under 10% overall, with no window above 13%.
+   - An edited version differs little overall but has a window with a big difference,
+     which pinpoints the edit.
+   - Different mixes and different songs differ by 25% or more.
+
+   These thresholds were measured on real libraries.
+3. **Plan.** Folders are ranked, and each one is removed only if a higher-ranked kept
+   folder holds an equal-or-better copy of every track in it. The plan is a JSON file;
+   see `src/musicdedup/planner.py` for its layout.
+4. **Apply.** Every file is re-checked against the plan before it's touched. Moves never
+   overwrite, and every action is written to a journal immediately.
+
+## Upgrading from 1.x (`musicorganise.py`)
+
+Version 2 is a rewrite. AcoustID is no longer used: version 1 trusted AcoustID's
+recording IDs, which treat explicit and clean versions as the same recording and
+can give identical files different IDs. Version 2 compares the audio directly and
+needs no API key. Your old `config.json` and `file_cache.db` are no longer used and
+can be deleted.
+
+`python3 musicorganise.py -p PATH -a list|move|delete [-m DIR] [--dry-run] [-y]` still
+works as a wrapper around the new commands, but `musicdedup` is recommended.
+
+## Development
 
 ```bash
-python3 musicorganise.py --path "/path/to/music" --action ACTION [options]
+pip install -e '.[dev]'
+ruff check .
+pytest                 # integration tests run when ffmpeg and fpcalc are installed
 ```
-
-### Command-Line Options
-
-- `-p, --path`: (Required) Path to the music directory to scan.
-- `-a, --action`: (Required) Action to take on duplicates. Choices are:
-  - `list`: List duplicates without making any changes.
-  - `move`: Move duplicates to a specified directory.
-  - `delete`: Delete duplicate files permanently.
-- `-m, --move-dir`: (Required if action is `move`) Directory to move duplicates to.
-- `-v, --verbose`: Enable verbose output with progress bars.
-- `-y, --yes`: Skip confirmation prompt for destructive actions.
-- `--log-level`: Set the logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`). Default is `INFO`.
-- `--no-multiprocessing`: Disable multiprocessing for debugging purposes.
-- `--dry-run`: Perform a test run without modifying any files.
-- `--clear-cache`: Clear the cache database before running.
-
-### Examples
-
-List duplicates with progress bar:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action list --verbose
-```
-
-Move duplicates to a directory:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action move --move-dir "/media/music/Duplicates" --verbose
-```
-
-Delete duplicates with detailed logging:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action delete --verbose --log-level DEBUG
-```
-
-Dry run (preview what would happen):
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action delete --dry-run --verbose
-```
-
-Disabling multiprocessing:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action list --no-multiprocessing --verbose
-```
-
-Adjusting batch size via `config.json`:
-
-```json
-{
-    "batch_size": 500
-}
-```
-
-## How It Works
-
-1. **File Scanning**: The script recursively scans the specified music directory for supported audio file formats (`.mp3`, `.flac`, `.ogg`, `.wav`, `.m4a`, `.aac`).
-
-2. **Metadata Extraction**: For each file, it extracts metadata such as artist, title, album, and track number using `mutagen`.
-
-3. **Audio Fingerprinting**: It generates an audio fingerprint using `fpcalc` and retrieves an AcoustID recording ID via the AcoustID API.
-
-4. **Directory Hashing**: Each directory's contents are hashed using AcoustID recording IDs (with metadata as a fallback). Directories with identical hashes are flagged as duplicates.
-
-5. **Duplicate Resolution**:
-   - **Inter-directory**: The best directory is kept (prioritizing FLAC files, then largest total size). Other directories are listed, moved, or deleted.
-   - **Intra-directory**: Within the kept directory, files with the same AcoustID are identified and resolved (keeping the highest quality format).
-
-6. **Caching**: The script caches metadata and AcoustID results in a local SQLite database (`file_cache.db`) to improve performance on subsequent runs. Cache entries are validated against file modification times.
-
-7. **Logging and Progress**: Detailed logs are recorded in `music_deduplicate.log`, and progress bars are displayed when `--verbose` is enabled.
-
-## Logging
-
-- **Log File**: Logs are saved to `music_deduplicate.log` in the script's directory.
-- **Log Levels**: Configurable via `--log-level`. Levels include `DEBUG`, `INFO`, `WARNING`, `ERROR`, and `CRITICAL`.
-
-Example command to set log level to DEBUG:
-
-```bash
-python3 musicorganise.py --path "/media/music/Organised" --action list --log-level DEBUG
-```
-
-## Limitations and Considerations
-
-- **AcoustID API Rate Limits**: API calls are rate-limited to 3 per second per process. Be mindful of usage when processing large music libraries.
-- **System Resources**: Multiprocessing can consume significant CPU and memory resources. Adjust `batch_size` and consider disabling multiprocessing if needed.
-- **Metadata Dependence**: Accurate metadata enhances duplicate detection efficiency.
-- **File Permissions**: Ensure the script has the necessary read/write permissions for all files and directories involved.
-- **Backups**: Always back up your music library before performing operations that modify or delete files.
-
-## Troubleshooting
-
-- **Too Many Open Files Error**:
-  - Increase the open file limit.
-  - Reduce the `batch_size`.
-- **Missing Dependencies**:
-  - Verify that all Python libraries and system dependencies are correctly installed.
-  - Run `pip install -r requirements.txt` to install all Python dependencies.
-- **AcoustID Lookup Failures**:
-  - Ensure you have a valid AcoustID API key.
-  - Check your internet connection.
-  - Some files may be corrupt or unsupported; consider replacing them.
-- **Multiprocessing Issues**:
-  - Use `--no-multiprocessing` to disable multiprocessing for debugging.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a pull request or open an issue for any bugs or feature requests.
 
 ## License
 
-This project is licensed under the MIT License.
-
-## Acknowledgments
-
-- **AcoustID**: For providing an open-source audio identification service.
-- **Mutagen**: For the powerful audio metadata handling library.
-- **FuzzyWuzzy**: For the fuzzy string matching library.
-- **tqdm**: For providing a simple and flexible progress bar utility.
-
-## Contact
-
-For any questions or support, please open an issue on the GitHub repository.
-
-**Note**: Always ensure you have backups of your music library before performing operations that modify or delete files.
+MIT. See [LICENSE](LICENSE).

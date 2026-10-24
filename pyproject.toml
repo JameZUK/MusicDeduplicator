@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musicdedup"
+dynamic = ["version"]
+description = "Find and safely remove duplicate albums and tracks in a music library using audio fingerprints."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "mutagen>=1.45",
+    "numpy>=1.22",
+    "tqdm>=4.60",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.scripts]
+musicdedup = "musicdedup.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/JameZUK/MusicDeduplicator"
+Issues = "https://github.com/JameZUK/MusicDeduplicator/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "musicdedup.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs ffmpeg and fpcalc on PATH"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]

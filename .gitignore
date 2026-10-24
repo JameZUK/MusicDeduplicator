@@ -1,6 +1,18 @@
 __pycache__/
-*.pyc
-*.pyo
+*.py[co]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Files musicdedup writes; they contain paths from your library.
+musicdedup-plan.json
+musicdedup-journal-*.jsonl
+musicdedup-deleted-*.jsonl
+
+# Left over from 1.x
 config.json
 file_cache.db
 music_deduplicate.log
