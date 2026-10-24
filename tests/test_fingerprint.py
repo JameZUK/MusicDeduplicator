@@ -61,3 +61,35 @@ def test_low_information():
     tone = np.tile(make_fp(10, 3), 200)
     assert is_low_information(tone)
     assert not is_low_information(make_fp(11))
+
+
+def test_batched_prefilter_never_rejects_what_the_pairwise_test_accepts():
+    """prefilter_many may let a few extra pairs through, but never fewer."""
+    from musicdedup.fingerprint import PREFILTER_MAX_BER, _best_offset, prefilter_many
+    rng = np.random.default_rng(5)
+    a = make_fp(1, 1800)
+    bs = []
+    for k in range(120):
+        kind = k % 6
+        if kind == 0:
+            b = noisy(a, rng.uniform(0, 0.12), seed=k)
+        elif kind == 1:
+            b = edited(a, 400, 30, seed=k)
+        elif kind == 2:
+            b = noisy(a, 0.25, seed=k)
+        elif kind == 3:
+            shift = int(rng.integers(-9, 10))
+            b = a[shift:] if shift >= 0 else np.concatenate([make_fp(k, -shift), a])
+        elif kind == 4:
+            b = make_fp(100 + k, int(rng.integers(1700, 1900)))
+        else:
+            b = make_fp(200 + k, int(rng.integers(30, 200)))   # short: the fallback path
+        bs.append(b)
+    expected = []
+    for b in bs:
+        found = _best_offset(a, b) if min(len(a), len(b)) >= 40 else None
+        expected.append(found is not None and found[1] <= PREFILTER_MAX_BER)
+    got = prefilter_many(a, bs)
+    assert all(g for g, e in zip(got, expected, strict=True) if e)
+    assert sum(got) <= sum(expected) + 2                  # and it still rejects unrelated tracks
+    assert any(expected) and not all(got)

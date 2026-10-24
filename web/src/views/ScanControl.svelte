@@ -10,7 +10,8 @@
   const pct = $derived(s.total ? Math.min(100, (s.done / s.total) * 100) : 0);
   const e = $derived(eta(s));
   const stageText = $derived({
-    starting: 'Starting', walking: 'Finding music', fingerprinting: 'Fingerprinting', comparing: 'Comparing',
+    starting: 'Starting', walking: 'Finding music', fingerprinting: 'Fingerprinting',
+    comparing: 'Comparing tracks',
   }[s.stage] || 'Scanning');
 
   function fmt(sec) {

@@ -31,9 +31,10 @@ export async function stopScan() {
   poll();
 }
 
-/** Files per second and seconds left for the fingerprinting stage. */
+/** Items per second and seconds left for the current stage (fingerprinting, comparing). */
 export function eta(s) {
-  if (s.stage !== 'fingerprinting' || !s.done || !s.started) return null;
-  const rate = s.done / (Date.now() / 1000 - s.started);
+  if (!['fingerprinting', 'comparing'].includes(s.stage) || !s.done || !s.total) return null;
+  const since = s.stage_started || s.started;
+  const rate = s.done / Math.max(1, Date.now() / 1000 - since);
   return { rate, left: rate > 0 ? (s.total - s.done) / rate : 0 };
 }

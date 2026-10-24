@@ -218,6 +218,8 @@ class App:
         self.scan_state = st
 
         def progress(stage: str, done: int, total: int) -> None:
+            if stage != st.get('stage'):
+                st['stage_started'] = time.time()   # for per-stage speed and time left
             st.update(stage=stage, done=done, total=total)
 
         def run():
