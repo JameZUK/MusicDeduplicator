@@ -278,6 +278,43 @@ class _Planner:
         out.sort(key=lambda x: (-x['shared_tracks'], x['folders']))
         return out
 
+    def folder_details(self) -> dict[str, dict]:
+        """Track lists and formats for every folder the plan mentions, so a viewer
+        (e.g. the dashboard) can show the plan without rescanning."""
+        paths: set[str] = set()
+        for g in self.groups:
+            paths.add(g['keep'])
+            paths.update(r['folder'] for r in g['remove'])
+        for e in self.editions_kept:
+            paths.update((e['folder'], e['contained_in']))
+        for b in self.blocked:
+            paths.update((b['folder'], b['copy_of']))
+        for w in self.within:
+            paths.add(w['folder'])
+        for a, b, _ in self.m.variants:
+            paths.update((a.folder, b.folder))
+        for x in self.overlaps():
+            paths.update(x['folders'])
+        out = {}
+        for path in sorted(paths):
+            folder = self.scan.folders.get(path)
+            if folder is None:
+                continue
+            tracks = sorted(folder.tracks, key=lambda t: ((t.info.disc, t.info.track) if t.info else (0, 0), t.path))
+            out[path] = {
+                'release': self._release(folder).describe(),
+                'tracks': [{
+                    **_ref(t), 'duration': round(t.duration, 2), 'error': t.error,
+                    'quality': t.info.describe() if t.info else 'unknown',
+                    **({k: getattr(t.info, k) for k in ('lossless', 'bits', 'sample_rate', 'bitrate',
+                                                        'artist', 'album', 'title', 'track', 'disc')}
+                       if t.info else {}),
+                } for t in tracks],
+                'extras': [{'path': e.path, 'size': e.size, 'mtime_ns': e.mtime_ns} for e in folder.extras],
+                'problems': folder.problems,
+            }
+        return out
+
     def variants(self) -> list[dict]:
         out = []
         for a, b, c in self.m.variants:
@@ -303,6 +340,16 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
     unreadable = sorted(({'path': t.path, 'error': t.error} for t in scan.tracks if t.error),
                         key=lambda x: x['path'])
     audio = [r for r in removals if r['reason'] != 'extra']
+    quality: dict[str, int] = defaultdict(int)
+    formats: dict[str, int] = defaultdict(int)
+    for t in scan.tracks:
+        formats[os.path.splitext(t.path)[1].lower().lstrip('.')] += 1
+        if not t.info:
+            quality['unknown'] += 1
+        elif t.info.lossless:
+            quality['hi-res' if (t.info.bits or 16) > 16 or t.info.sample_rate > 48000 else 'cd'] += 1
+        else:
+            quality['lossy'] += 1
     return {
         'format': PLAN_FORMAT,
         'version': PLAN_VERSION,
@@ -313,7 +360,10 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
                     'remove_smaller_editions': options.remove_smaller_editions},
         'summary': {
             'audio_files': len(scan.tracks),
+            'audio_bytes': sum(t.size for t in scan.tracks),
             'folders': len(scan.folders),
+            'quality': dict(sorted(quality.items())),
+            'formats': dict(sorted(formats.items(), key=lambda kv: -kv[1])),
             'duplicate_folders': sum(len(g['remove']) for g in p.groups),
             'files_to_remove': len(removals),
             'audio_files_to_remove': len(audio),
@@ -336,4 +386,5 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
         'edited_versions': p.variants(),
         'shared_tracks': p.overlaps(),
         'unreadable': unreadable,
+        'folders': p.folder_details(),
     }

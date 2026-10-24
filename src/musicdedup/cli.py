@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from .matcher import find_matches
 from .planner import Options, build_plan
 from .report import format_report, human_bytes
 from .scanner import scan
+from .state import default_state_dir
 
 log = logging.getLogger('musicdedup')
 
@@ -118,7 +120,7 @@ def cmd_apply(args) -> int:
             print("Cancelled; nothing was changed.")
             return 1
     result = apply_plan(plan, mode=mode, move_to=args.move_to, dry_run=args.dry_run,
-                        journal_path=args.journal)
+                        journal_path=args.journal, state_dir=default_state_dir(), user=getpass.getuser())
     done = ', '.join(f"{v} {k}" for k, v in sorted(result.counts.items())) or 'nothing done'
     prefix = '[dry run] ' if args.dry_run else ''
     print(f"\n{prefix}{done}; {human_bytes(result.bytes_freed)} {'would be ' if args.dry_run else ''}freed.")
@@ -134,12 +136,40 @@ def cmd_apply(args) -> int:
 
 
 def cmd_undo(args) -> int:
-    result = undo(args.journal, dry_run=args.dry_run)
+    result = undo(args.journal, dry_run=args.dry_run, state_dir=default_state_dir(), user=getpass.getuser())
     done = ', '.join(f"{v} {k}" for k, v in sorted(result.counts.items())) or 'nothing to do'
     print(('[dry run] ' if args.dry_run else '') + done)
     for path, why in result.skipped[:20]:
         print(f"  {path}: {why}")
     return 0 if not result.counts.get('failed') else 1
+
+
+def cmd_serve(args) -> int:
+    from .web.access import DEFAULT_ALLOW, AccessPolicy
+    from .web.server import App, make_server
+    try:
+        policy = AccessPolicy(mode=args.auth, allow=args.allow or DEFAULT_ALLOW,
+                              trusted_proxies=args.trusted_proxy, hostnames=args.hostname)
+    except ValueError as e:
+        log.error("%s", e)
+        return 2
+    if args.move_to and not os.path.isdir(args.move_to):
+        log.error("--move-to folder does not exist: %s", args.move_to)
+        return 2
+    app = App(args.plan, policy, state_dir=default_state_dir(), cache_path=args.cache or default_cache_path(),
+              move_to=args.move_to, allow_delete=args.allow_delete)
+    server = make_server(app, args.host, args.port)
+    where = ', '.join(policy.allow) if args.auth == 'none' else f"login via proxy {', '.join(args.trusted_proxy)}"
+    print(f"Dashboard on http://{args.host}:{args.port}/  (access: {where})")
+    if args.host in ('127.0.0.1', 'localhost', '::1'):
+        print("Only this machine can connect. Use --host 0.0.0.0 to allow your LAN.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
 
 
 def cmd_cache(args) -> int:
@@ -199,6 +229,23 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument('journal')
     u.add_argument('-n', '--dry-run', action='store_true')
     u.set_defaults(func=cmd_undo)
+
+    w = sub.add_parser('serve', parents=[common], help="open the review dashboard for a plan")
+    w.add_argument('plan', help="plan file written by 'scan'")
+    w.add_argument('--host', default='127.0.0.1', help="address to listen on (default: 127.0.0.1)")
+    w.add_argument('--port', type=int, default=8650)
+    w.add_argument('--auth', choices=['none', 'authelia'], default='none',
+                   help="none: no login, LAN addresses only; authelia: trust a login proxy")
+    w.add_argument('--allow', action='append', metavar='CIDR',
+                   help="with --auth none, addresses allowed in (repeatable; default: loopback and private LAN ranges)")
+    w.add_argument('--trusted-proxy', action='append', default=[], metavar='CIDR',
+                   help="with --auth authelia, the reverse proxy's address (repeatable)")
+    w.add_argument('--hostname', action='append', default=[], metavar='NAME',
+                   help="extra host name the dashboard is reached by (repeatable)")
+    w.add_argument('--move-to', metavar='DIR', help="quarantine folder for moves made from the dashboard")
+    w.add_argument('--allow-delete', action='store_true', help="allow permanent deletes from the dashboard")
+    w.add_argument('--cache', help="fingerprint cache file")
+    w.set_defaults(func=cmd_serve)
 
     c = sub.add_parser('cache', parents=[common], help="show or clear the fingerprint cache")
     c.add_argument('action', choices=['info', 'clear'])

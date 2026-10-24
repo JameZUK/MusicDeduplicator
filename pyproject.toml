@@ -31,6 +31,9 @@ version = { attr = "musicdedup.__version__" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"musicdedup.web" = ["static/*", "static/assets/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: needs ffmpeg and fpcalc on PATH"]

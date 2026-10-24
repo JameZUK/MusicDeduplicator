@@ -155,3 +155,24 @@ def compare(a: np.ndarray, b: np.ndarray) -> Comparison | None:
     else:
         max_block, at = ber, 0.0
     return Comparison(ber=ber, max_block_ber=max_block, offset=offset, max_block_at=at)
+
+
+def compare_profile(a: np.ndarray, b: np.ndarray) -> dict | None:
+    """The full comparison for display: per-window difference over time."""
+    c = compare(a, b)
+    if c is None:
+        return None
+    x, y = (a[c.offset:], b) if c.offset >= 0 else (a, b[-c.offset:])
+    n = min(len(x), len(y))
+    bits = _popcount(x[:n] ^ y[:n]).astype(np.float64)
+    nblocks = max(1, n // BLOCK_ITEMS)
+    blocks = bits[:nblocks * BLOCK_ITEMS].reshape(nblocks, -1).mean(axis=1) / 32
+    return {
+        'kind': c.kind, 'ber': round(c.ber, 4), 'max_window_ber': round(c.max_block_ber, 4),
+        'offset_seconds': round(c.offset * ITEM_SECONDS, 3),
+        'window_seconds': round(BLOCK_ITEMS * ITEM_SECONDS, 3),
+        'start_seconds': round(max(c.offset, 0) * ITEM_SECONDS, 3),
+        'windows': [round(float(v), 3) for v in blocks],
+        'thresholds': {'same_max_ber': SAME_MAX_BER, 'same_max_window_ber': SAME_MAX_BLOCK_BER,
+                       'variant_max_ber': VARIANT_MAX_BER},
+    }

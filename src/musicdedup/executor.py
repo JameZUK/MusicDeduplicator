@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from .audio import is_audio
 from .planner import PLAN_FORMAT, PLAN_VERSION
+from .state import Busy, apply_lock, record_history
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +143,25 @@ class _Journal:
 
 
 def apply_plan(plan: dict, *, mode: str, move_to: str | None = None, dry_run: bool = False,
-               journal_path: str | None = None) -> Result:
+               journal_path: str | None = None, state_dir: str | None = None,
+               user: str | None = None) -> Result:
+    """Carries out a plan. With state_dir, takes the shared apply lock (so the CLI
+    and the dashboard never apply at once) and records the run in the history."""
+    if state_dir is None or dry_run:
+        return _apply_plan(plan, mode, move_to, dry_run, journal_path, user)
+    try:
+        with apply_lock(state_dir):
+            result = _apply_plan(plan, mode, move_to, dry_run, journal_path, user)
+    except Busy as e:
+        raise PlanError(str(e)) from e
+    record_history(state_dir, {'op': 'apply', 'mode': mode, 'journal': result.journal, 'user': user,
+                               'plan_created': plan.get('created'), 'counts': dict(result.counts),
+                               'bytes': result.bytes_freed, 'skipped': len(result.skipped)})
+    return result
+
+
+def _apply_plan(plan: dict, mode: str, move_to: str | None, dry_run: bool,
+                journal_path: str | None, user: str | None) -> Result:
     if mode not in ('move', 'delete'):
         raise PlanError(f"unknown mode {mode!r}")
     roots = [os.path.realpath(r) for r in plan['roots']]
@@ -179,7 +198,7 @@ def apply_plan(plan: dict, *, mode: str, move_to: str | None = None, dry_run: bo
 
     journal = _Journal(None if dry_run else journal_path,
                        {'mode': mode, 'move_to': move_to, 'roots': roots, 'time': stamp,
-                        'plan_created': plan.get('created')})
+                        'plan_created': plan.get('created'), 'user': user})
     verb = 'Would move' if dry_run and mode == 'move' else (
         'Would delete' if dry_run else ('Moved' if mode == 'move' else 'Deleted'))
     touched_dirs: set[str] = set()
@@ -256,8 +275,22 @@ def apply_plan(plan: dict, *, mode: str, move_to: str | None = None, dry_run: bo
     return result
 
 
-def undo(journal_path: str, dry_run: bool = False) -> Result:
+def undo(journal_path: str, dry_run: bool = False, state_dir: str | None = None,
+         user: str | None = None) -> Result:
     """Moves files back to where they came from, newest first. Never overwrites."""
+    if state_dir is None or dry_run:
+        return _undo(journal_path, dry_run)
+    try:
+        with apply_lock(state_dir):
+            result = _undo(journal_path, dry_run)
+    except Busy as e:
+        raise PlanError(str(e)) from e
+    record_history(state_dir, {'op': 'undo', 'journal': journal_path, 'user': user,
+                               'counts': dict(result.counts), 'skipped': len(result.skipped)})
+    return result
+
+
+def _undo(journal_path: str, dry_run: bool) -> Result:
     try:
         with open(journal_path, encoding='utf-8') as f:
             entries = [json.loads(line) for line in f if line.strip()]

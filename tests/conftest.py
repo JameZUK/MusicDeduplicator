@@ -102,6 +102,13 @@ class FakeLibrary:
         return result, matches, build_plan(result, matches, Options(**options))
 
 
+@pytest.fixture(autouse=True)
+def isolated_user_dirs(tmp_path, monkeypatch):
+    """Keep tests away from the real cache, state and history."""
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path / 'xdg-cache'))
+    monkeypatch.setenv('XDG_STATE_HOME', str(tmp_path / 'xdg-state'))
+
+
 @pytest.fixture
 def lib(tmp_path) -> FakeLibrary:
     root = tmp_path / 'music'
