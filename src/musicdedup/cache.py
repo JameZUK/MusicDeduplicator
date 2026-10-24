@@ -40,11 +40,15 @@ class Cache:
         if path:
             self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.execute('PRAGMA synchronous=NORMAL')
+        self._pending = 0
         version = self.conn.execute('PRAGMA user_version').fetchone()[0]
-        if version != SCHEMA_VERSION:
-            # Older or unknown layout: start again rather than migrate a cache.
-            self.conn.execute('DROP TABLE IF EXISTS tracks')
-            self.conn.execute('DROP TABLE IF EXISTS file_cache')
+        if version == SCHEMA_VERSION:
+            # Opening an existing cache writes nothing, so it can't wait on (or be
+            # refused by) a scan that holds the write lock in another process or thread.
+            return
+        # Older or unknown layout: start again rather than migrate a cache.
+        self.conn.execute('DROP TABLE IF EXISTS tracks')
+        self.conn.execute('DROP TABLE IF EXISTS file_cache')
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS tracks (
                 path TEXT PRIMARY KEY,
@@ -58,7 +62,6 @@ class Cache:
             )''')
         self.conn.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         self.conn.commit()
-        self._pending = 0
 
     def get(self, path: str, size: int, mtime_ns: int) -> CachedTrack | None:
         row = self.conn.execute(

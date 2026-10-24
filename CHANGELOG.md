@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.1.1 — 2026-10-24
+
+### Fixed
+- Multi-disc releases could be split: each disc folder ('CD 1', 'Digital Media 02') was
+  planned on its own, so a disc that also appeared on another release (the standard album,
+  a box set) was removed and the rest of the set left behind. A disc is now only removed
+  if the whole release is, or if the copy kept is in the same release. Discs kept this way
+  are listed under "Kept intact".
+- More disc folder names are recognised, including Lidarr's medium names ('12" Vinyl 01',
+  'SHM-CD 01', 'Enhanced CD 01', 'Cassette 01') and 'Disc One' or 'CD II'.
+- Comparing tracks in the dashboard during a rescan could fail with "database is locked":
+  opening the fingerprint cache no longer writes to it.
+
 ## 2.1.0 — 2026-10-24
 
 ### Added

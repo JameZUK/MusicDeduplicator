@@ -253,6 +253,7 @@ doesn't stop the service).
 | Different mix or remaster with different timing | Not a duplicate |
 | Some tracks shared (compilations, best-ofs, partial overlap) | Both kept. Reported as shared tracks |
 | The same track twice in one folder by accident (FLAC + MP3, `Song (1).flac`, same track number) | Reported. Add `--within-folders` to remove the extra copy |
+| One disc of a multi-disc release (`CD 2`, `Disc 1`, `Digital Media 01`, `12" Vinyl 02`…) that's also on another release | **Kept**, so the set stays complete. A disc only goes if the whole release does, or if its copy is in the same release |
 | An album that repeats a track on purpose (different track numbers) | Kept intact |
 | A folder containing an unreadable or corrupt audio file | Never removed. Corrupt files are listed |
 | A damaged but playable file (a glitch the decoder skips) | Still matched, by decoding through ffmpeg. Where there's a copy, the clean one is kept; a damaged lossless copy still beats a clean lossy one |

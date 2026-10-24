@@ -34,9 +34,12 @@ def test_base_title_ignores_noise(a, b):
 
 
 def test_disc_folders():
-    for name in ('CD 1', 'CD1', 'Disc 2', 'disk 03', 'CD 01'):
+    for name in ('CD 1', 'CD1', 'Disc 2', 'disk 03', 'CD 01', 'Digital Media 02', 'Vinyl 1',
+                 '12 Vinyl 01', '12" Vinyl 02', 'SHM-CD 01', 'Enhanced CD 01', 'Cassette 03', 'Side B',
+                 'Disc One', 'CD II', 'Blu-ray 1', 'SACD 01'):
         assert is_disc_folder(name)
-    for name in ('CDs I Like', 'Discovery', 'Album'):
+    for name in ('CDs I Like', 'Discovery', 'Disco', 'Album', 'Digital Media', 'Vinyl Days', 'Sidewinder',
+                 'Discography', '12 Vinyl Classics', 'Tape Loops', 'LP5'):
         assert not is_disc_folder(name)
 
 

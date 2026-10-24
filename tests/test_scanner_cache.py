@@ -1,4 +1,6 @@
 import os
+import sqlite3
+import time
 
 from conftest import make_fp
 
@@ -152,3 +154,16 @@ def test_scan_can_be_cancelled(lib):
     stop.set()
     with pytest.raises(ScanCancelled):
         scan([lib.root], Cache(None), fingerprint_fn=lib.fingerprint, info_fn=lib.info, cancel=stop)
+
+
+def test_cache_opens_while_a_scan_holds_the_write_lock(tmp_path):
+    # The dashboard opens the cache to compare tracks while a rescan is writing to it.
+    path = str(tmp_path / 'c.db')
+    Cache(path).conn.close()
+    writer = sqlite3.connect(path)
+    writer.execute('BEGIN IMMEDIATE')
+    started = time.monotonic()
+    reader = Cache(path)
+    assert reader.get('/nowhere.flac', 1, 1) is None
+    assert time.monotonic() - started < 5
+    writer.rollback()

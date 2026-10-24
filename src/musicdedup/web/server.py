@@ -140,6 +140,7 @@ class App:
         keys = ('created', 'roots', 'options', 'summary', 'smaller_editions_kept', 'repeated_in_release',
                 'blocked', 'edited_versions', 'shared_tracks', 'unreadable', 'within_folder')
         extra = {k: p.get(k) for k in ('library', 'new_music', 'scan_seconds', 'damaged')}
+        extra['discs_kept'] = p.get('discs_kept', [])
         return {k: p[k] for k in keys} | extra | {'groups': groups, 'plan_id': self.plan_id}
 
     def group(self, gid: int) -> dict:

@@ -38,7 +38,14 @@ _EDITION_PATTERNS = {
     'japan': r'japan(?:ese)?',
 }
 _EDITION_RE = {k: re.compile(rf'\b{v}\b', re.I) for k, v in _EDITION_PATTERNS.items()}
-_DISC_FOLDER_RE = re.compile(r'^\s*(?:cd|disc|disk|side)\s*[-_]?\s*\w{1,3}\s*$', re.I)
+# A folder holding one disc of a release: 'CD 1', 'Disc 2', 'Side A', and the
+# medium names Lidarr uses ('Digital Media 01', '12" Vinyl 02', 'SHM-CD 01', 'Cassette 03').
+_DISC_FOLDER_RE = re.compile(
+    r'^\s*(?:\d{1,2}"?\s*)?'                                          # 12" (vinyl size)
+    r'(?:(?:enhanced|shm|blu-spec|hybrid|copy control|data|hd|dual)[- ]?)?'
+    r'(?:cd(?:-r)?|sacd|disc|disk|side|digital media|vinyl|dvd(?:-audio|-video)?|blu-?ray'
+    r'|cassette|tape|minidisc|dualdisc)'
+    r'\s*[-_]?\s*(?:\d{1,3}|[ivx]{1,4}|[a-h]|one|two|three|four|five|six|seven|eight|nine|ten)\s*$', re.I)
 _BRACKETS_RE = re.compile(r'[(\[{][^)\]}]*[)\]}]')
 _NOISE_RE = re.compile(r'\b(?:edition|version|explicit|clean|e|\d{4})\b', re.I)
 _COPY_NAME_RE = re.compile(r'(?:\bcopy(?:\s*\d+)?|\(\d+\))\s*$', re.I)

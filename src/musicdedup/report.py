@@ -77,6 +77,16 @@ def format_report(plan: dict, limit: int | None = 25) -> str:
         more(editions)
         add('')
 
+    discs = plan.get('discs_kept', [])
+    if discs:
+        add("Kept intact: discs of a multi-disc release whose other discs are kept"
+            " (removing them would leave the set incomplete):")
+        for d in capped(discs):
+            add(f"  {_rel(d['folder'], roots)}")
+            add(f"      also in {_rel(d['copy_of'], roots)}")
+        more(discs)
+        add('')
+
     repeated = plan['repeated_in_release']
     if repeated:
         add("Kept intact: the same audio appears twice in a release's track list (e.g. a reprise or bonus repeat):")

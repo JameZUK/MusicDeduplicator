@@ -23,7 +23,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from . import __version__
-from .editions import Release, accidental_copy, release_of, same_edition
+from .editions import Release, accidental_copy, is_disc_folder, release_of, same_edition
 from .matcher import Matches
 from .scanner import Folder, ScanResult, Track
 
@@ -64,6 +64,9 @@ class _Planner:
         self.within_enabled = options.within_folders
         self.remove_smaller_editions = options.remove_smaller_editions
         self.editions_kept: list[dict] = []
+        self.discs_kept: list[dict] = []
+        # Removed folder -> what removing it added, so keep_releases_whole can take it back.
+        self._folder_removal: dict[str, dict] = {}
         self.repeated: list[dict] = []
         self._releases: dict[str, Release] = {}
         self.removed: set[Track] = set()
@@ -238,12 +241,14 @@ class _Planner:
             self.groups.append(group)
         group['remove'].append({'folder': folder.path, 'kind': kind, 'tracks': distinct,
                                 'bytes': sum(t.size for t in pairs)})
+        record = self._folder_removal[folder.path] = {
+            'group': group, 'keeper': keeper.path, 'tracks': list(pairs), 'entries': [], 'within': []}
         detail = ('identical album' if kind == 'duplicate'
                   else f'all {distinct} tracks are also in a larger kept folder')
         for t, o in sorted(pairs.items(), key=lambda p: p[0].path):
             self.removed.add(t)
-            self.removals.append({**_ref(t), 'keep': _ref(o), 'reason': f'{kind}-album',
-                                  'group': group['id'], 'detail': detail})
+            record['entries'].append({**_ref(t), 'keep': _ref(o), 'reason': f'{kind}-album',
+                                      'group': group['id'], 'detail': detail})
         # Copies already planned as within-folder duplicates named a file in this
         # folder as the one to keep; that file is going, so point them at its keeper.
         for t in folder.tracks:
@@ -251,11 +256,60 @@ class _Planner:
             if entry is not None and self.dup_of.get(t) in pairs:
                 entry.update(keep=_ref(pairs[self.dup_of[t]]), reason=f'{kind}-album',
                              group=group['id'], detail=detail)
+                record['within'].append((entry, t))
         # The folder is emptied of audio, so its artwork etc. goes with it.
         for e in folder.extras:
-            self.removals.append({'path': e.path, 'size': e.size, 'mtime_ns': e.mtime_ns,
-                                  'keep': None, 'reason': 'extra', 'group': group['id'],
-                                  'detail': 'non-audio file in a removed folder'})
+            record['entries'].append({'path': e.path, 'size': e.size, 'mtime_ns': e.mtime_ns,
+                                      'keep': None, 'reason': 'extra', 'group': group['id'],
+                                      'detail': 'non-audio file in a removed folder'})
+        self.removals.extend(record['entries'])
+
+    def keep_releases_whole(self) -> None:
+        """A multi-disc release keeps each disc in its own folder ('CD 1', 'CD 2'), and
+        each was planned on its own. A disc whose copy is in another release (the
+        standard album, a box set) may only go if the whole release goes; otherwise
+        the set would be left with a disc missing. Copies kept inside the same
+        release (loose tracks that duplicate 'CD 1') are fine."""
+        discs: dict[str, list[str]] = defaultdict(list)
+        for path in self.scan.folders:
+            if is_disc_folder(os.path.basename(path)):
+                discs[os.path.dirname(path)].append(path)
+        for release, parts in sorted(discs.items()):
+            if release in self.scan.folders:
+                parts = [*parts, release]
+            if len(parts) < 2:
+                continue
+
+            def inside(p: str, release: str = release) -> bool:
+                return p == release or p.startswith(release + os.sep)
+
+            elsewhere = [p for p in sorted(parts)
+                         if p in self._folder_removal and not inside(self._folder_removal[p]['keeper'])]
+            if elsewhere and any(p not in self._folder_removal for p in parts):
+                for p in elsewhere:
+                    self._keep_folder(p, release)
+        # Groups left empty go, and the rest are numbered 1, 2, 3... again.
+        self.groups = [g for g in self.groups if g['remove']]
+        number = {g['id']: i for i, g in enumerate(self.groups, 1)}
+        for g in self.groups:
+            g['id'] = number[g['id']]
+        for r in self.removals:
+            if r.get('group') is not None:
+                r['group'] = number[r['group']]
+
+    def _keep_folder(self, path: str, release: str) -> None:
+        """Takes back the removal of a folder planned by _remove_folder."""
+        record = self._folder_removal.pop(path)
+        group = record['group']
+        group['remove'] = [r for r in group['remove'] if r['folder'] != path]
+        dropped = {id(e) for e in record['entries']}
+        self.removals = [r for r in self.removals if id(r) not in dropped]
+        self.removed.difference_update(record['tracks'])
+        for entry, t in record['within']:  # back to the best copy in its own folder
+            entry.update(keep=_ref(self.dup_of[t]), reason='within-folder',
+                         detail='same audio as another file in this folder')
+            entry.pop('group', None)
+        self.discs_kept.append({'folder': path, 'release': release, 'copy_of': record['keeper']})
 
     # -- reports -----------------------------------------------------------------
 
@@ -287,6 +341,8 @@ class _Planner:
             paths.update(r['folder'] for r in g['remove'])
         for e in self.editions_kept:
             paths.update((e['folder'], e['contained_in']))
+        for d in self.discs_kept:
+            paths.update((d['folder'], d['copy_of']))
         for b in self.blocked:
             paths.update((b['folder'], b['copy_of']))
         for w in self.within:
@@ -390,6 +446,7 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
     p = _Planner(scan, matches, options)
     p.plan_within_folders()
     p.plan_folders()
+    p.keep_releases_whole()
     removals = sorted(p.removals, key=lambda r: r['path'])
     # Defence in depth: never plan to remove a file another removal relies on.
     paths = {r['path'] for r in removals}
@@ -431,6 +488,7 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
             'bytes_to_free': sum(r['size'] for r in removals),
             'within_folder_duplicates': len(p.within),
             'smaller_editions_kept': len(p.editions_kept),
+            'discs_kept': len(p.discs_kept),
             'repeated_tracks_kept': len(p.repeated),
             'edited_versions': len(matches.variants),
             'unreadable_audio_files': len(unreadable),
@@ -443,6 +501,7 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
         'removals': removals,
         'within_folder': p.within,
         'smaller_editions_kept': p.editions_kept,
+        'discs_kept': p.discs_kept,
         'repeated_in_release': p.repeated,
         'blocked': p.blocked,
         'edited_versions': p.variants(),

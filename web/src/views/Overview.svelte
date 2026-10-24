@@ -102,6 +102,7 @@
     <p class="muted">Releases that share audio but are distinct, so nothing in them is removed.</p>
     <dl>
       <div><dt>Smaller editions inside a bigger one</dt><dd class="mono">{plan.smaller_editions_kept.length}</dd></div>
+      <div><dt>Discs of a multi-disc set</dt><dd class="mono">{plan.discs_kept?.length ?? 0}</dd></div>
       <div><dt>Tracks a release repeats on purpose</dt><dd class="mono">{plan.repeated_in_release.length}</dd></div>
       <div><dt>Copies blocked by unreadable files</dt><dd class="mono">{plan.blocked.length}</dd></div>
     </dl>

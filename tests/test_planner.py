@@ -216,3 +216,50 @@ def test_damaged_lossless_is_not_swapped_for_clean_lossy(lib):
     lib.album('B/Album mp3', [1, 2], MP3_320, transform=lambda fp: noisy(fp, 0.02), ext='mp3')
     _, _, plan = lib.scan()
     assert kept_folders(plan) == {'A/Album flac'} and removed_folders(plan) == {'B/Album mp3'}
+
+
+def test_disc_of_a_deluxe_is_not_removed_for_the_standard_album(lib):
+    # The deluxe's CD 1 is the standard album; removing it would leave the set with CD 2 only.
+    lib.album('A/Album', [1, 2, 3], album='Album')
+    lib.album('A/Album (Deluxe)/CD 1', [1, 2, 3], album='Album (Deluxe)')
+    lib.album('A/Album (Deluxe)/CD 2', [4, 5], album='Album (Deluxe)')
+    _, _, plan = lib.scan()
+    assert plan['removals'] == [] and plan['groups'] == []
+    [kept] = plan['discs_kept']
+    assert rel(plan, kept['folder']) == 'A/Album (Deluxe)/CD 1'
+    assert rel(plan, kept['release']) == 'A/Album (Deluxe)'
+
+
+def test_a_disc_from_a_box_set_is_not_removed(lib):
+    lib.album('A/Second Album', [4, 5, 6], FLAC24)
+    lib.album('A/Box Set/CD 1', [1, 2, 3])
+    lib.album('A/Box Set/CD 2', [4, 5, 6])
+    lib.album('A/Box Set/CD 3', [7, 8])
+    lib.album('B/Other Album', [9, 10], ext='flac')
+    lib.album('B/Other Album copy', [9, 10], MP3_320, ext='mp3')
+    _, _, plan = lib.scan()
+    assert removed_folders(plan) == {'B/Other Album copy'}
+    assert [g['id'] for g in plan['groups']] == [1]            # numbered again after taking one back
+    assert {r['group'] for r in plan['removals']} == {1}
+    assert [rel(plan, d['folder']) for d in plan['discs_kept']] == ['A/Box Set/CD 2']
+
+
+def test_a_whole_multi_disc_copy_is_still_removed(lib):
+    lib.album('A/Set/CD 1', [1, 2], FLAC24)
+    lib.album('A/Set/CD 2', [3, 4], FLAC24)
+    lib.album('B/Set (copy)/Disc 1', [1, 2], MP3_320, ext='mp3')
+    lib.album('B/Set (copy)/Disc 2', [3, 4], MP3_320, ext='mp3')
+    _, _, plan = lib.scan()
+    assert removed_folders(plan) == {'B/Set (copy)/Disc 1', 'B/Set (copy)/Disc 2'}
+    assert plan['discs_kept'] == []
+
+
+def test_loose_tracks_duplicating_a_disc_of_the_same_release_are_removed(lib):
+    # An MP3 copy of disc 1 left at the top of the release: the FLAC disc is kept.
+    lib.album('A/Album', [1, 2, 3], MP3_320, ext='mp3')
+    lib.album('A/Album/Digital Media 01', [1, 2, 3])
+    lib.album('A/Album/Digital Media 02', [4, 5])
+    _, _, plan = lib.scan()
+    assert removed_folders(plan) == {'A/Album'}
+    assert kept_folders(plan) == {'A/Album/Digital Media 01'}
+    assert plan['discs_kept'] == []
