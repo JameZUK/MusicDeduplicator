@@ -18,16 +18,21 @@ by trusting file names or tags, then remove the duplicates safely.
   every file before touching it, moves rather than deletes by default, and records
   everything so you can undo it.
 - **Copes with messy libraries.** Corrupt files, symlinks, hard links, macOS `._`
-  files and NAS metadata folders are handled. A folder holding anything unreadable
-  is never removed.
+  files and NAS metadata folders are handled. Damaged files are decoded through ffmpeg
+  and matched anyway. A folder holding anything unreadable is never removed.
+- **Review in a browser, on a desktop or a phone.** `musicdedup serve` shows every
+  duplicate with its artwork and quality. You can listen to two copies with instant A/B
+  switching, decide one by one or in bulk, and rescan from the dashboard.
 
 ## Screenshots
 
-All of these show a demo library of invented bands with synthesised music.
+All of these show a demo library of invented bands with synthesised music, which
+[`tools/make_demo_library.py`](tools/make_demo_library.py) builds (see Development).
 
-**Overview:** your collection at a glance, and everything the scan found.
+**Overview:** your collection at a glance, with the space you could free, what's new
+since the last scan, and everything the scan found.
 
-![Overview: track count, size, quality split, editions kept intact, edited versions and unreadable files](docs/screenshots/overview.png)
+![Overview: track count, size, reclaimable space, quality split, new music, editions kept intact, similar versions and unreadable files](docs/screenshots/overview.png)
 
 **Reviewing a duplicate:** the copy kept (24-bit/96 kHz) and the copies to remove, side by side.
 The patch bay links every track to its match; ▶ plays a pair so you can listen to both.
@@ -47,6 +52,22 @@ between A and B instantly without losing your place.
 **Deciding in bulk:** every group in a list, with the quality kept and removed, ready to accept together.
 
 ![Bulk list with checkboxes, the quality kept and removed, and space freed per group](docs/screenshots/bulk.png)
+
+**Library:** statistics for the whole collection, and the albums new since the last scan.
+
+![Library page: totals, new music, formats, bit depths, sample rates and biggest artists](docs/screenshots/library.png)
+
+**Scanning from the dashboard:** live progress with the speed and time left, and a Stop
+button that loses nothing.
+
+![A scan in progress: fingerprinting progress bar with speed, time left and a Stop button](docs/screenshots/scanning.png)
+
+**On a phone:** the same dashboard, with copies stacked and the decision buttons kept in reach.
+
+<p>
+  <img src="docs/screenshots/mobile-overview.png" width="260" alt="The overview on a phone">
+  <img src="docs/screenshots/mobile-review.png" width="260" alt="Reviewing a duplicate on a phone">
+</p>
 
 **Light theme:**
 
@@ -137,8 +158,9 @@ musicdedup serve musicdedup-plan.json --move-to ~/Duplicates
 # then open http://127.0.0.1:8650/
 ```
 
-- **Overview:** collection size, the split between hi-res, CD-quality and lossy tracks,
-  space you could free, editions kept intact, edited versions and unreadable files.
+- **Overview:** collection size, the space you could free (a meter that fills as you decide),
+  the split between hi-res, CD-quality and lossy tracks, new music, editions kept intact,
+  similar versions, and unreadable or damaged files.
 - **Review, one by one:** each duplicate group shown as album cards with their artwork
   and quality. A "patch bay" links every track to its copy in the folder being kept.
   Accept the group (<kbd>A</kbd>), keep everything (<kbd>S</kbd>) or choose a different
@@ -159,10 +181,15 @@ musicdedup serve musicdedup-plan.json --move-to ~/Duplicates
 - **Apply and undo:** preview exactly what will change, do a dry run, then move (or, with
   `--allow-delete`, delete). History lists every apply, from the dashboard or the CLI,
   with one-click undo for moves.
+- **Phones and tablets:** the layout adapts to small screens, with copies stacked, a
+  sticky Accept / Keep all bar, and ‹ › to step between groups.
 
 Your decisions are saved as you go, on the machine running the dashboard, so you can
 stop and carry on later or from another device. Nothing changes until you press Apply,
 and applying uses the same checks as `musicdedup apply`.
+
+`--act-on` works as for `apply`, so the dashboard can rescan through one mount and act
+through another.
 
 Waveforms need `ffmpeg` on the machine running the dashboard. Comparisons load both
 copies into the browser's memory first (a few seconds for hi-res files), which is what
@@ -183,6 +210,36 @@ dashboard by a host name, add it with `--hostname dedup.example.lan` (other name
 refused, which blocks DNS-rebinding attacks). Behind a proxy, pass the original `Host`
 header through. For nginx with Authelia, add `proxy_set_header Host $host;` alongside
 the usual `auth_request` settings.
+
+### Running it as a service
+
+To keep the dashboard running and rescan whenever you like, run `serve` with
+`--library` under systemd. A minimal unit:
+
+```ini
+# /etc/systemd/system/musicdedup-web.service
+[Unit]
+Description=musicdedup dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=listener
+WorkingDirectory=/home/listener/musicdedup
+ExecStart=/home/listener/musicdedup/.venv/bin/musicdedup serve plan.json \
+    --host 0.0.0.0 --library /srv/music --move-to /srv/music/.musicdedup-quarantine \
+    --log-file dashboard.log
+Nice=10
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The first start shows the scan screen; press Scan, or add `--scan-on-start`. If the music
+is on a network or automounted share, order the unit after that mount (for an automount,
+`Wants=` and `After=` on its `.automount` unit, so that the share unmounting when idle
+doesn't stop the service).
 
 ## What counts as a duplicate
 
@@ -226,10 +283,12 @@ musicdedup scan LIBRARY [LIBRARY ...]
   --full-report                print every entry instead of the first 25
 
 musicdedup apply PLAN (--move-to DIR | --delete) [--dry-run] [--yes] [--journal FILE]
+                 [--act-on SCANNED=LIVE]
 musicdedup undo JOURNAL [--dry-run]
 musicdedup serve PLAN [--host ADDR] [--port 8650] [--move-to DIR] [--allow-delete]
                  [--auth none|authelia] [--allow CIDR] [--trusted-proxy CIDR] [--hostname NAME]
-                 [--library FOLDER] [--scan-on-start] [scan options: --exclude, --prefer, ...]
+                 [--library FOLDER] [--scan-on-start] [--act-on SCANNED=LIVE] [--cache FILE]
+                 [scan options: --exclude, --prefer, --within-folders, --workers, ...]
 musicdedup cache info|clear
 
 All commands: -v/--verbose, -q/--quiet, --log-file FILE
@@ -245,7 +304,8 @@ proceed without `--yes` when it isn't run from a terminal.
 ## How it works
 
 1. **Scan.** Walks the folders without following symlinks and fingerprints each audio
-   file with `fpcalc` (the whole track, in parallel). Fingerprints, format and tags are
+   file with `fpcalc` (the whole track, in parallel). If `fpcalc` can't read a file, it's
+   decoded through `ffmpeg`, skipping bad frames, and marked damaged if anything was skipped. Fingerprints, format and tags are
    cached, keyed by path, size and modification time to the nanosecond.
 2. **Compare.** Tracks of similar length are compared by aligning their fingerprints
    and measuring the fraction of differing bits, overall and in 2.5-second windows.
@@ -285,6 +345,15 @@ The dashboard's source is in `web/` (Svelte + Vite). Its build output is committ
 
 ```bash
 cd web && npm install && npm run build      # npm run dev proxies to a running `musicdedup serve`
+```
+
+To try the tool, or the dashboard, without touching your own music, build the demo
+library (invented bands, synthesised audio, about 750 MB; needs ffmpeg):
+
+```bash
+python tools/make_demo_library.py ~/demo
+musicdedup serve ~/demo/plan.json --library ~/demo/Music --within-folders --move-to ~/demo/Quarantine
+python tools/make_demo_library.py ~/demo --later   # adds an album, to see "new music" on a rescan
 ```
 
 ## License

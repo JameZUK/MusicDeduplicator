@@ -17,6 +17,7 @@
   function fmt(sec) {
     if (!Number.isFinite(sec)) return '';
     const m = Math.round(sec / 60);
+    if (m < 1) return 'under a minute';
     return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m` : `${m}m`;
   }
 

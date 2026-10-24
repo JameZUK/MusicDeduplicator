@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.1.0 — 2026-10-24
+
+### Added
+- Rescan from the dashboard (`serve --library FOLDER`), with live progress, speed, time left
+  and a Stop button. Stopping loses nothing; decisions carry over to the new plan.
+  `--scan-on-start` starts a scan when the server starts, and a first run with no plan
+  yet shows the scan and opens the plan when it's done.
+- Library page: tracks, size, playing time, artists, formats, bit depths, sample rates,
+  the biggest artists and albums, and a scan history.
+- New music: what was added or changed since the last completed scan, on the Overview
+  and the Library page.
+- Damaged files: when `fpcalc` can't read a file, it's decoded through `ffmpeg`, skipping
+  bad frames, and matched anyway. Files where ffmpeg hit bad data are marked damaged (⚠);
+  where there's another copy, the clean one is kept. Files that failed in an earlier
+  version are retried once.
+- `apply --act-on SCANNED=LIVE` (and `serve --act-on`): carry out a plan made from one
+  mount, such as a read-only one, on another mount of the same files. Every file is
+  re-checked there first. The quarantine folder may be a hidden folder inside the library.
+- The dashboard works on phones: stacked track lists and a sticky Accept/Keep bar.
+- `tools/make_demo_library.py` builds a fictional demo library for trying the tool out.
+
+### Changed
+- Comparing is about 25 times faster on large libraries (precomputed fingerprint
+  probes, compared in parallel).
+- The reclaimable meter on the Overview shows the total before any decisions are made.
+
 ## 2.0.0 — 2026-10-24
 
 A rewrite focused on safety and reliability.
@@ -33,5 +59,8 @@ A rewrite focused on safety and reliability.
 - Moving to a quarantine folder is the recommended default; deleting needs explicit confirmation.
 - Packaged as `musicdedup` with a console command, a test suite and CI.
   `musicorganise.py` remains as a compatibility wrapper.
+- `musicdedup serve`: a browser dashboard to review a plan, compare and listen to copies
+  side by side (A/B with waveforms and the difference highlighted), decide one by one or
+  in bulk, then apply and undo. Login through Authelia, or LAN-only without one.
 - No config file is needed any more. The cache has moved out of the script folder to
   `~/.cache/musicdedup/`.
