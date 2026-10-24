@@ -109,3 +109,46 @@ def test_progress_is_logged_without_a_progress_bar(lib, monkeypatch, caplog):
     with caplog.at_level('INFO', logger='musicdedup.scanner'):
         lib.scan()
     assert any('Fingerprinted 3 of 3 files' in r.message for r in caplog.records)
+
+
+def test_new_and_changed_files_are_tracked(lib, tmp_path):
+    lib.album('A/Album', [1, 2])
+    cache = Cache(str(tmp_path / 'cache.db'))
+    _, _, plan = lib.scan(cache=cache)
+    assert plan['new_music']['first_scan'] and plan['new_music']['new_tracks'] == 2
+    lib.album('B/New Album', [7, 8, 9])
+    p = lib.path('A/Album/01.flac')
+    st = os.stat(p)
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 1))
+    _, _, plan = lib.scan(cache=cache)
+    nm = plan['new_music']
+    assert not nm['first_scan'] and nm['new_tracks'] == 3 and nm['changed_tracks'] == 1
+    assert {os.path.relpath(f['folder'], lib.root): (f['new'], f['changed']) for f in nm['folders']} == {
+        'B/New Album': (3, 0), 'A/Album': (0, 1)}
+    _, _, plan = lib.scan(cache=cache)
+    assert plan['new_music']['folders'] == []
+    cache.close()
+
+
+def test_library_stats(lib):
+    from conftest import FLAC24, MP3_320
+    lib.album('A/Album', [1, 2], FLAC24, album='Album')
+    lib.album('B/Other', [3], MP3_320, ext='mp3')
+    _, _, plan = lib.scan()
+    s = plan['library']
+    assert s['tracks'] == 3 and s['albums'] == 2
+    assert s['bit_depth'] == {'24-bit': 2} and s['lossy_bitrate'] == {'320 kbps and up': 1}
+    assert s['duration_seconds'] > 0 and s['top_artists'][0]['tracks'] >= 1
+
+
+def test_scan_can_be_cancelled(lib):
+    import threading
+
+    import pytest
+
+    from musicdedup.scanner import ScanCancelled, scan
+    lib.album('A/Album', [1, 2])
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(ScanCancelled):
+        scan([lib.root], Cache(None), fingerprint_fn=lib.fingerprint, info_fn=lib.info, cancel=stop)

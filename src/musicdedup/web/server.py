@@ -26,7 +26,10 @@ from ..cache import Cache
 from ..decisions import DecisionError, apply_decisions
 from ..executor import PlanError, apply_plan, load_plan, undo
 from ..fingerprint import FingerprintError, compare_profile, run_fpcalc
-from ..state import read_history
+from ..pipeline import run_scan
+from ..planner import Options
+from ..scanner import ScanCancelled
+from ..state import read_history, read_scans
 from ..waveform import WaveformError, waveform
 from .access import AccessPolicy, Denied
 
@@ -46,34 +49,83 @@ class App:
     """Everything the handlers share: the plan, settings, cache and jobs."""
 
     def __init__(self, plan_path: str, policy: AccessPolicy, *, state_dir: str, cache_path: str | None,
-                 move_to: str | None, allow_delete: bool):
+                 move_to: str | None, allow_delete: bool, library: list[str] | None = None,
+                 excludes: list[str] | None = None, scan_options: Options | None = None,
+                 workers: int | None = None):
         self.plan_path = os.path.abspath(plan_path)
         self.policy = policy
         self.state_dir = state_dir
         self.cache_path = cache_path
         self.move_to = move_to
         self.allow_delete = allow_delete
+        self.library = library or []
+        self.excludes = excludes or []
+        self.scan_options = scan_options or Options()
+        self.workers = workers
         self.jobs: dict[str, dict] = {}
+        self.scan_state: dict = {'state': 'idle'}
+        self._cancel = threading.Event()
         self._lock = threading.Lock()
         self._plan_mtime = None
-        self.plan: dict = {}
+        self.plan: dict | None = None
+        self.plan_id: str | None = None
+        self.tracks: dict = {}
         self.reload()
 
     # -- plan ---------------------------------------------------------------------
 
     def reload(self) -> None:
-        mtime = os.path.getmtime(self.plan_path)
+        """Loads the plan if it is new or has changed. A missing plan is fine: the
+        dashboard then says a scan is needed (or running) and picks it up later."""
+        try:
+            mtime = os.path.getmtime(self.plan_path)
+        except FileNotFoundError:
+            return
         with self._lock:
             if mtime == self._plan_mtime:
                 return
             plan = load_plan(self.plan_path)
+            previous, previous_id = self.plan, self.plan_id
             self.plan = plan
             self._plan_mtime = mtime
             self.tracks = {t['path']: t for f in plan.get('folders', {}).values() for t in f['tracks']}
             self.plan_id = hashlib.sha256(f"{plan['created']}|{self.plan_path}".encode()).hexdigest()[:16]
+            if previous is not None and previous_id != self.plan_id:
+                self._carry_decisions(previous, previous_id)
+
+    def require_plan(self) -> dict:
+        self.reload()
+        if self.plan is None:
+            raise Denied(503, "no plan yet: run a scan")
+        return self.plan
+
+    @staticmethod
+    def _signature(group: dict) -> str:
+        return '\0'.join([group['keep'], *sorted(r['folder'] for r in group['remove'])])
+
+    def _carry_decisions(self, previous: dict, previous_id: str) -> None:
+        """A rescan makes a new plan; keep each decision whose group is unchanged."""
+        if os.path.exists(self._decisions_path()):
+            return
+        try:
+            with open(os.path.join(self.state_dir, f'decisions-{previous_id}.json'), encoding='utf-8') as f:
+                old = json.load(f)
+        except (OSError, ValueError):
+            return
+        by_sig = {self._signature(g): old.get('groups', {}).get(str(g['id']))
+                  for g in previous['groups']}
+        groups = {}
+        for g in self.plan['groups']:
+            choice = by_sig.get(self._signature(g))
+            members = {g['keep'], *(r['folder'] for r in g['remove'])}
+            if choice in ('accept', 'skip') or (isinstance(choice, dict) and choice.get('keep') in members):
+                groups[str(g['id'])] = choice
+        within_now = {w['remove']['path'] for w in self.plan.get('within_folder', [])}
+        self.save_decisions({'groups': groups,
+                             'within': [p for p in old.get('within', []) if p in within_now]})
 
     def overview(self) -> dict:
-        p = self.plan
+        p = self.require_plan()
         groups = []
         for g in p['groups']:
             keep = p['folders'].get(g['keep'], {})
@@ -84,11 +136,13 @@ class App:
                            'identical': all(r['kind'] == 'duplicate' for r in g['remove']),
                            'only_lossy_removed': all(r['lossy'] for r in removes),
                            'bytes': sum(r['bytes'] for r in g['remove'])})
-        return {k: p[k] for k in ('created', 'roots', 'options', 'summary', 'smaller_editions_kept',
-                                  'repeated_in_release', 'blocked', 'edited_versions', 'shared_tracks',
-                                  'unreadable', 'within_folder')} | {'groups': groups, 'plan_id': self.plan_id}
+        keys = ('created', 'roots', 'options', 'summary', 'smaller_editions_kept', 'repeated_in_release',
+                'blocked', 'edited_versions', 'shared_tracks', 'unreadable', 'within_folder')
+        extra = {k: p.get(k) for k in ('library', 'new_music', 'scan_seconds')}
+        return {k: p[k] for k in keys} | extra | {'groups': groups, 'plan_id': self.plan_id}
 
     def group(self, gid: int) -> dict:
+        self.require_plan()
         g = next((g for g in self.plan['groups'] if g['id'] == gid), None)
         if g is None:
             raise Denied(404, "no such group")
@@ -98,7 +152,7 @@ class App:
         return {'group': g, 'folders': {f: self.plan['folders'].get(f) for f in folders}, 'pairs': pairs}
 
     def folder(self, path: str) -> dict:
-        f = self.plan['folders'].get(path)
+        f = self.require_plan()['folders'].get(path)
         if f is None:
             raise Denied(404, "folder is not part of this plan")
         return f
@@ -144,6 +198,51 @@ class App:
     def compare(self, a: str, b: str) -> dict:
         profile = compare_profile(self.fingerprint(a), self.fingerprint(b))
         return profile or {'kind': 'different'}
+
+    # -- scanning ------------------------------------------------------------------
+
+    @property
+    def scanning(self) -> bool:
+        return self.scan_state.get('state') == 'running'
+
+    def start_scan(self, user: str | None) -> None:
+        if not self.library:
+            raise Denied(409, "rescanning is not configured: start the server with --library")
+        if self.scanning:
+            raise Denied(409, "a scan is already running")
+        if any(j['state'] == 'running' for j in self.jobs.values()):
+            raise Denied(409, "wait for the current apply or undo to finish")
+        self._cancel.clear()
+        st = {'state': 'running', 'stage': 'starting', 'done': 0, 'total': 0, 'started': time.time(),
+              'user': user}
+        self.scan_state = st
+
+        def progress(stage: str, done: int, total: int) -> None:
+            st.update(stage=stage, done=done, total=total)
+
+        def run():
+            try:
+                plan = run_scan(self.library, plan_path=self.plan_path, cache_path=self.cache_path,
+                                options=self.scan_options, excludes=self.excludes, workers=self.workers,
+                                on_progress=progress, cancel=self._cancel, state_dir=self.state_dir)
+                st.update(state='done', summary={
+                    'tracks': plan['summary']['audio_files'],
+                    'new': plan['new_music']['new_tracks'], 'changed': plan['new_music']['changed_tracks'],
+                    'duplicate_folders': plan['summary']['duplicate_folders']})
+                self.reload()
+            except ScanCancelled:
+                st.update(state='cancelled')
+            except Exception as e:  # report, never crash the server
+                log.exception("scan failed")
+                st.update(state='failed', error=str(e))
+            st['finished'] = time.time()
+
+        threading.Thread(target=run, daemon=True, name='scan').start()
+
+    def cancel_scan(self) -> None:
+        if not self.scanning:
+            raise Denied(409, "no scan is running")
+        self._cancel.set()
 
     # -- jobs ----------------------------------------------------------------------
 
@@ -263,21 +362,27 @@ class Handler(BaseHTTPRequestHandler):
         (r'/api/decisions', 'get_decisions'),
         (r'/api/history', 'get_history'),
         (r'/api/jobs/([0-9a-f]+)', 'get_job'),
+        (r'/api/scan', 'get_scan'),
+        (r'/api/scans', 'get_scans'),
     ]
     WRITE_ROUTES = [
         (r'/api/decisions', 'put_decisions'),
         (r'/api/preview', 'post_preview'),
         (r'/api/apply', 'post_apply'),
         (r'/api/undo', 'post_undo'),
+        (r'/api/scan', 'post_scan'),
+        (r'/api/scan/cancel', 'post_scan_cancel'),
     ]
 
     # -- reads ------------------------------------------------------------------------
 
     def get_session(self, q):
         app = self.app
+        app.reload()
         self._json({'csrf': app.policy.csrf_token, 'user': self.user, 'auth': app.policy.mode,
                     'version': __version__, 'move_to': app.move_to, 'allow_delete': app.allow_delete,
-                    'plan_path': app.plan_path})
+                    'plan_path': app.plan_path, 'has_plan': app.plan is not None,
+                    'can_scan': bool(app.library), 'library': app.library})
 
     def get_plan(self, q):
         self.app.reload()
@@ -297,6 +402,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def get_history(self, q):
         self._json(list(reversed(read_history(self.app.state_dir)))[:200])
+
+    def get_scan(self, q):
+        self._json(self.app.scan_state)
+
+    def get_scans(self, q):
+        self._json(list(reversed(read_scans(self.app.state_dir)))[:100])
+
+    def post_scan(self, q):
+        self.app.start_scan(self.user or f"{self.client_address[0]} (no login)")
+        self._json(self.app.scan_state, 202)
+
+    def post_scan_cancel(self, q):
+        self.app.cancel_scan()
+        self._json({'ok': True})
 
     def get_job(self, q, jid):
         job = self.app.jobs.get(jid)
@@ -396,7 +515,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({'ok': True})
 
     def post_preview(self, q):
-        new, warnings = apply_decisions(self.app.plan, self._body().get('decisions') or {})
+        new, warnings = apply_decisions(self.app.require_plan(), self._body().get('decisions') or {})
         self._json({'summary': new['summary'], 'warnings': warnings, 'removals': new['removals'][:2000],
                     'groups': new['groups']})
 
@@ -414,7 +533,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise Denied(400, "type 'delete' to confirm")
         else:
             raise Denied(400, "mode must be 'move' or 'delete'")
-        new, _ = apply_decisions(app.plan, body.get('decisions') or {})
+        if app.scanning:
+            raise Denied(409, "a scan is running; apply when it has finished")
+        new, _ = apply_decisions(app.require_plan(), body.get('decisions') or {})
         if not new['removals']:
             raise Denied(400, "nothing to apply: accept some groups first")
         user = self.user or f"{self.client_address[0]} (no login)"

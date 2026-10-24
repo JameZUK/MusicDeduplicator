@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import json
 import logging
 import os
 import sys
@@ -20,10 +19,9 @@ from . import __version__
 from .cache import Cache, default_cache_path
 from .executor import PlanError, apply_plan, load_plan, undo
 from .fingerprint import fpcalc_version
-from .matcher import find_matches
-from .planner import Options, build_plan
+from .pipeline import run_scan
+from .planner import Options
 from .report import format_report, human_bytes
-from .scanner import scan
 from .state import default_state_dir
 
 log = logging.getLogger('musicdedup')
@@ -81,18 +79,13 @@ def cmd_scan(args) -> int:
             return 2
     log.debug("Using %s", version)
     progress = not args.quiet and sys.stderr.isatty()
-    cache = _open_cache(args)
-    try:
-        result = scan(args.library, cache, workers=args.workers, excludes=args.exclude,
-                      progress=progress)
-    finally:
-        cache.close()
-    matches = find_matches(result.tracks, progress=progress)
-    plan = build_plan(result, matches, Options(prefer=args.prefer, within_folders=args.within_folders,
-                                                remove_smaller_editions=args.remove_smaller_editions))
     plan_path = os.path.abspath(args.plan)
-    with open(plan_path, 'w', encoding='utf-8') as f:
-        json.dump(plan, f, indent=1)
+    plan = run_scan(args.library, plan_path=plan_path,
+                    cache_path=None if args.no_cache else (args.cache or default_cache_path()),
+                    options=Options(prefer=args.prefer, within_folders=args.within_folders,
+                                    remove_smaller_editions=args.remove_smaller_editions),
+                    excludes=args.exclude, workers=args.workers, progress=progress,
+                    state_dir=default_state_dir())
     print(format_report(plan, limit=None if args.full_report else 25))
     print(f"\nPlan written to {plan_path}")
     if plan['removals']:
@@ -156,9 +149,21 @@ def cmd_serve(args) -> int:
     if args.move_to and not os.path.isdir(args.move_to):
         log.error("--move-to folder does not exist: %s", args.move_to)
         return 2
+    for p in args.library:
+        if not os.path.isdir(p):
+            log.error("--library folder does not exist: %s", p)
+            return 2
+    if args.scan_on_start and not args.library:
+        log.error("--scan-on-start needs --library")
+        return 2
     app = App(args.plan, policy, state_dir=default_state_dir(), cache_path=args.cache or default_cache_path(),
-              move_to=args.move_to, allow_delete=args.allow_delete)
+              move_to=args.move_to, allow_delete=args.allow_delete, library=args.library,
+              excludes=args.exclude, workers=args.workers,
+              scan_options=Options(prefer=args.prefer, within_folders=args.within_folders,
+                                   remove_smaller_editions=args.remove_smaller_editions))
     server = make_server(app, args.host, args.port)
+    if args.scan_on_start:
+        app.start_scan('server start')
     where = ', '.join(policy.allow) if args.auth == 'none' else f"login via proxy {', '.join(args.trusted_proxy)}"
     print(f"Dashboard on http://{args.host}:{args.port}/  (access: {where})")
     if args.host in ('127.0.0.1', 'localhost', '::1'):
@@ -245,6 +250,14 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument('--move-to', metavar='DIR', help="quarantine folder for moves made from the dashboard")
     w.add_argument('--allow-delete', action='store_true', help="allow permanent deletes from the dashboard")
     w.add_argument('--cache', help="fingerprint cache file")
+    w.add_argument('--library', action='append', default=[], metavar='FOLDER',
+                   help="music folder(s) to rescan from the dashboard (repeatable); the plan is written to PLAN")
+    w.add_argument('--exclude', action='append', default=[], metavar='PATTERN', help="as for scan")
+    w.add_argument('--prefer', action='append', default=[], metavar='FOLDER', help="as for scan")
+    w.add_argument('--within-folders', action='store_true', help="as for scan")
+    w.add_argument('--remove-smaller-editions', action='store_true', help="as for scan")
+    w.add_argument('--workers', type=int, help="parallel fingerprinting jobs for rescans")
+    w.add_argument('--scan-on-start', action='store_true', help="start a rescan as soon as the server starts")
     w.set_defaults(func=cmd_serve)
 
     c = sub.add_parser('cache', parents=[common], help="show or clear the fingerprint cache")

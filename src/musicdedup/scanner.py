@@ -6,6 +6,7 @@ import fnmatch
 import logging
 import os
 import stat
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -38,6 +39,7 @@ class Track:
     info: AudioInfo | None = None
     error: str | None = None
     hardlink_of: str | None = None
+    status: str = 'cached'      # cached | new | changed (since the previous scan)
 
     @property
     def folder(self) -> str:
@@ -82,6 +84,13 @@ class ScanResult:
     stats: Counter
 
 
+class ScanCancelled(Exception):
+    """The scan was stopped on request. Work done so far is cached."""
+
+
+# progress(stage, done, total): stage is 'walking', 'fingerprinting' or 'comparing'.
+ProgressFn = Callable[[str, int, int], None]
+
 # fingerprint_fn(path) -> (duration, fingerprint); info_fn(path) -> AudioInfo.
 FingerprintFn = Callable[[str], tuple[float, np.ndarray]]
 InfoFn = Callable[[str], AudioInfo]
@@ -99,7 +108,7 @@ def _skip_dir(name: str, rel: str, excludes: list[str]) -> bool:
 
 
 def _walk(roots: list[str], excludes: list[str], exclude_paths: list[str],
-          skipped: Counter) -> tuple[dict[str, Folder], list[Track]]:
+          skipped: Counter, on_progress=None, cancel=None) -> tuple[dict[str, Folder], list[Track]]:
     folders: dict[str, Folder] = {}
     tracks: list[Track] = []
     seen_inodes: dict[tuple[int, int], str] = {}
@@ -153,6 +162,10 @@ def _walk(roots: list[str], excludes: list[str], exclude_paths: list[str],
                 tracks.append(track)
             if folder.tracks:
                 folders[dirpath] = folder
+                if on_progress and len(folders) % 50 == 0:
+                    on_progress('walking', len(tracks), 0)
+            if cancel is not None and cancel.is_set():
+                raise ScanCancelled()
     return folders, tracks
 
 
@@ -170,12 +183,18 @@ def _analyse(path: str, fingerprint_fn: FingerprintFn, info_fn: InfoFn):
 def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
          excludes: list[str] | None = None, exclude_paths: list[str] | None = None,
          fingerprint_fn: FingerprintFn = run_fpcalc, info_fn: InfoFn = read_audio_info,
-         progress: bool = False) -> ScanResult:
+         progress: bool = False, on_progress: ProgressFn | None = None,
+         cancel: threading.Event | None = None, new_since: float | None = None) -> ScanResult:
+    """Walks and fingerprints. `on_progress` is called as work proceeds; setting
+    `cancel` stops the scan with ScanCancelled (finished work stays cached).
+    `new_since` is when the previous *completed* scan ran: files first fingerprinted
+    after it count as new even if a stopped scan did the work."""
     roots = [os.path.realpath(r) for r in roots]
     exclude_paths = [os.path.realpath(p) for p in exclude_paths or []]
     skipped: Counter = Counter()
     stats: Counter = Counter()
-    folders, tracks = _walk(roots, excludes or [], exclude_paths, skipped)
+    stats['first scan'] = int(all(cache.count_under(r) == 0 for r in roots))
+    folders, tracks = _walk(roots, excludes or [], exclude_paths, skipped, on_progress, cancel)
     log.info("Found %d audio files in %d folders", len(tracks), len(folders))
 
     todo = []
@@ -187,7 +206,12 @@ def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
             t.duration, t.fingerprint, t.info, t.error = (
                 cached.duration, cached.fingerprint, cached.info, cached.error)
             stats['from cache'] += 1
+            if new_since is not None and cached.scanned_at > new_since:
+                t.status = 'new'
+                stats['new files'] += 1
         else:
+            t.status = 'changed' if cache.known(t.path) else 'new'
+            stats[f'{t.status} files'] += 1
             todo.append(t)
 
     if todo:
@@ -206,6 +230,10 @@ def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
                 stats['fingerprinted'] += 1
                 if not transient:
                     cache.put(t.path, t.size, t.mtime_ns, t.duration, t.fingerprint, t.info, t.error)
+                if on_progress:
+                    on_progress('fingerprinting', stats['fingerprinted'], len(todo))
+                if cancel is not None and cancel.is_set():
+                    raise ScanCancelled()
                 if bar:
                     bar.update()
                 elif time.monotonic() - last_report >= PROGRESS_LOG_SECONDS:
@@ -215,7 +243,7 @@ def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
                     rate = done / (last_report - started)
                     log.info("Fingerprinted %d of %d files (%.1f/s, about %s left)", done, len(todo), rate,
                              _duration((len(todo) - done) / rate if rate else 0))
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, ScanCancelled):
             pool.shutdown(wait=False, cancel_futures=True)
             cache.commit()
             raise

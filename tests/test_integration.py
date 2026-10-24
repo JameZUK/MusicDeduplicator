@@ -138,3 +138,99 @@ def test_waveform_peaks(library):
     assert 39 < w['duration'] < 41
     assert len(w['peak']) == pytest.approx(w['duration'] * w['per_second'], abs=1)
     assert max(w['peak']) > 100 and all(0 <= v <= 255 for v in w['peak'])
+
+
+def test_dashboard_scans_without_a_plan_and_carries_decisions(library, tmp_path, monkeypatch):
+    import threading
+    import time
+    import urllib.request
+
+    from musicdedup.planner import Options
+    from musicdedup.web.access import AccessPolicy
+    from musicdedup.web.server import App, make_server
+
+    lib = tmp_path / 'lib'
+    shutil.copytree(library, lib)
+    plan_path = tmp_path / 'plan.json'
+    app = App(str(plan_path), AccessPolicy(), state_dir=str(tmp_path / 'state'), cache_path=str(tmp_path / 'c.db'),
+              move_to=None, allow_delete=False, library=[str(lib)], scan_options=Options())
+    srv = make_server(app, '127.0.0.1', 0)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f'http://127.0.0.1:{srv.server_address[1]}'
+
+    def call(path, body=None):
+        token = json.load(urllib.request.urlopen(base + '/api/session'))['csrf']
+        req = urllib.request.Request(base + path, data=json.dumps(body).encode() if body is not None else None,
+                                     method='POST' if body is not None else 'GET',
+                                     headers={'Content-Type': 'application/json', 'X-CSRF-Token': token})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def scan_and_wait():
+        assert call('/api/scan', {})[0] == 202
+        for _ in range(300):
+            st = call('/api/scan')[1]
+            if st['state'] != 'running':
+                return st
+            time.sleep(0.1)
+        raise AssertionError('scan did not finish')
+
+    try:
+        session = call('/api/session')[1]
+        assert session['has_plan'] is False and session['can_scan'] is True
+        assert call('/api/plan')[0] == 503
+        st = scan_and_wait()
+        assert st['state'] == 'done' and st['summary']['tracks'] == 13
+        plan = call('/api/plan')[1]
+        assert plan['new_music']['first_scan'] and plan['library']['tracks'] == 13
+        gid = str(plan['groups'][0]['id'])
+        req = urllib.request.Request(base + '/api/decisions', method='PUT',
+                                     data=json.dumps({'groups': {gid: 'accept'}}).encode(),
+                                     headers={'Content-Type': 'application/json',
+                                              'X-CSRF-Token': call('/api/session')[1]['csrf']})
+        urllib.request.urlopen(req)
+
+        write_audio(f'{lib}/Artist/New Single/01.flac', melody(42), FLAC)
+        time.sleep(1.1)   # the plan's "created" time is per second
+        st = scan_and_wait()
+        assert st['summary']['new'] == 1
+        plan = call('/api/plan')[1]
+        assert [os.path.relpath(f['folder'], lib) for f in plan['new_music']['folders']] == ['Artist/New Single']
+        assert call('/api/decisions')[1]['groups'] == {gid: 'accept'}   # carried over
+        assert len(call('/api/scans')[1]) == 2
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_new_music_after_a_stopped_scan(library, tmp_path):
+    import threading
+
+    from musicdedup.pipeline import run_scan
+    from musicdedup.planner import Options
+    from musicdedup.scanner import ScanCancelled
+
+    lib = tmp_path / 'lib'
+    shutil.copytree(library, lib)
+    kw = dict(plan_path=str(tmp_path / 'p.json'), cache_path=str(tmp_path / 'c.db'), options=Options(),
+              state_dir=str(tmp_path / 'state'))
+    stop = threading.Event()
+    seen = []
+
+    def progress(stage, done, total):
+        seen.append(stage)
+        if stage == 'fingerprinting' and done >= 3:
+            stop.set()
+
+    with pytest.raises(ScanCancelled):
+        run_scan([str(lib)], on_progress=progress, cancel=stop, **kw)
+    plan = run_scan([str(lib)], **kw)
+    assert plan['new_music']['first_scan'] is True          # nothing had completed before
+    write_audio(f'{lib}/Artist/Later/01.flac', melody(77), FLAC)
+    plan = run_scan([str(lib)], **kw)
+    nm = plan['new_music']
+    assert nm['first_scan'] is False and nm['new_tracks'] == 1
+    assert [os.path.relpath(f['folder'], lib) for f in nm['folders']] == ['Artist/Later']

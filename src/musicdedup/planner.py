@@ -325,6 +325,66 @@ class _Planner:
         return out
 
 
+def _library_stats(scan: ScanResult) -> dict:
+    """Whole-collection statistics for the dashboard."""
+    artists: dict[str, dict] = {}
+    bits: dict[str, int] = defaultdict(int)
+    rates: dict[str, int] = defaultdict(int)
+    bitrates: dict[str, int] = defaultdict(int)
+    duration = 0.0
+    for t in scan.tracks:
+        duration += t.duration or 0
+        info = t.info
+        name = (info.artist.strip() if info and info.artist else '') or \
+            os.path.relpath(t.folder, t.root).split(os.sep)[0]
+        a = artists.setdefault(name.casefold(), {'artist': name, 'tracks': 0, 'bytes': 0})
+        a['tracks'] += 1
+        a['bytes'] += t.size
+        if not info:
+            continue
+        if info.lossless:
+            bits[f"{info.bits or 16}-bit"] += 1
+            if info.sample_rate:
+                rates[f"{info.sample_rate / 1000:g} kHz"] += 1
+        elif info.bitrate:
+            kbps = info.bitrate / 1000
+            bucket = ('under 192 kbps' if kbps < 190 else '192-255 kbps' if kbps < 250
+                      else '256-319 kbps' if kbps < 310 else '320 kbps and up')
+            bitrates[bucket] += 1
+    albums = sorted(({'folder': f.path, 'tracks': len(f.tracks), 'bytes': sum(t.size for t in f.tracks)}
+                     for f in scan.folders.values()), key=lambda x: -x['bytes'])
+    top = sorted(artists.values(), key=lambda x: -x['bytes'])
+    return {
+        'tracks': len(scan.tracks),
+        'bytes': sum(t.size for t in scan.tracks),
+        'duration_seconds': round(duration),
+        'artists': len(artists),
+        'albums': len(scan.folders),
+        'bit_depth': dict(sorted(bits.items())),
+        'sample_rate': dict(sorted(rates.items(), key=lambda kv: float(kv[0].split()[0]))),
+        'lossy_bitrate': dict(bitrates),
+        'top_artists': top[:15],
+        'largest_albums': albums[:10],
+    }
+
+
+def _new_music(scan: ScanResult) -> dict:
+    """Folders with files that are new or changed since the previous scan."""
+    per: dict[str, dict] = {}
+    for t in scan.tracks:
+        if t.status == 'cached':
+            continue
+        e = per.setdefault(t.folder, {'folder': t.folder, 'new': 0, 'changed': 0,
+                                      'tracks': len(scan.folders[t.folder].tracks) if t.folder in scan.folders else 0})
+        e[t.status] += 1
+    return {
+        'first_scan': bool(scan.stats.get('first scan')),
+        'new_tracks': sum(e['new'] for e in per.values()),
+        'changed_tracks': sum(e['changed'] for e in per.values()),
+        'folders': sorted(per.values(), key=lambda e: e['folder'])[:1000],
+    }
+
+
 def build_plan(scan: ScanResult, matches: Matches, options: Options | None = None) -> dict:
     options = options or Options()
     p = _Planner(scan, matches, options)
@@ -387,4 +447,6 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
         'shared_tracks': p.overlaps(),
         'unreadable': unreadable,
         'folders': p.folder_details(),
+        'library': _library_stats(scan),
+        'new_music': _new_music(scan),
     }

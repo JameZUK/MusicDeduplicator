@@ -13,6 +13,9 @@
   import History from './views/History.svelte';
   import ApplyDialog from './views/ApplyDialog.svelte';
   import ThemeToggle from './views/ThemeToggle.svelte';
+  import Library from './views/Library.svelte';
+  import ScanControl from './views/ScanControl.svelte';
+  import { watchScans } from './lib/scan.svelte.js';
 
   let loading = $state(true);
   let applying = $state(false);
@@ -24,8 +27,10 @@
   const withinCount = $derived(store.decisions.within.length);
 
   async function refresh() {
-    const [session, plan, decisions] = await Promise.all([loadSession(), api.plan(), api.decisions()]);
+    const session = await loadSession();
     store.session = session;
+    if (!session.has_plan) { store.plan = null; return; }
+    const [plan, decisions] = await Promise.all([api.plan(), api.decisions()]);
     store.plan = plan;
     store.decisions = { groups: decisions.groups || {}, within: decisions.within || [] };
   }
@@ -38,11 +43,18 @@
     } finally {
       loading = false;
     }
+    // When a scan finishes, load the new plan (decisions carry over on the server).
+    watchScans(async (s) => {
+      if (s.state === 'done') {
+        try { await refresh(); } catch (e) { store.error = e.message; }
+      }
+    });
   });
 
   const nav = [
     ['overview', 'Overview'],
     ['review', 'Review'],
+    ['library', 'Library'],
     ['history', 'History'],
   ];
 </script>
@@ -62,6 +74,7 @@
       {/each}
     </nav>
     <div class="right">
+      {#if store.plan || store.scan.state === 'running'}<ScanControl />{/if}
       {#if store.plan}
         <div class="tally" title="Groups you've decided on">
           <span class="eyebrow">decided</span>
@@ -88,9 +101,20 @@
   <main>
     {#if loading}
       <div class="loading"><span class="eyebrow">loading the plan…</span></div>
+    {:else if !store.plan && store.session}
+      <section class="first rise">
+        <span class="eyebrow">no plan yet</span>
+        <h1>{store.scan.state === 'running' ? 'Scanning your music…' : 'Scan your music to begin'}</h1>
+        <p>{store.session.can_scan
+          ? `The first scan fingerprints every track in ${store.session.library.join(', ')}. That takes a while, but later scans only look at what has changed.`
+          : 'Run musicdedup scan, or start the dashboard with --library so it can scan for you.'}</p>
+        <ScanControl big />
+      </section>
     {:else if store.plan}
       {#if route.view === 'review'}
         <Review id={route.id} />
+      {:else if route.view === 'library'}
+        <Library />
       {:else if route.view === 'history'}
         <History />
       {:else}
@@ -176,6 +200,9 @@
 
   main { padding: 26px 28px 110px; min-width: 0; }
   .loading { display: grid; place-items: center; height: 50vh; }
+  .first { max-width: 680px; margin: 10vh auto; display: flex; flex-direction: column; gap: 14px; }
+  .first h1 { font-size: clamp(32px, 4.5vw, 54px); font-weight: 500; }
+  .first p { color: var(--ink-2); font-size: 16px; margin: 0; }
 
   footer {
     display: flex; gap: 8px; padding: 14px 28px; color: var(--ink-3); font-size: 12px;

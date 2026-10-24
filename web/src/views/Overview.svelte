@@ -76,6 +76,19 @@
     </div>
   </article>
 
+  {#if plan.new_music && !plan.new_music.first_scan}
+    <article class="panel card wide rise new" style:animation-delay="90ms">
+      <header><h2>New since the last scan</h2>
+        <span class="eyebrow">{plan.new_music.new_tracks} new · {plan.new_music.changed_tracks} changed</span></header>
+      {#if plan.new_music.folders.length}
+        <p class="muted">{plan.new_music.folders.length} album folder{plan.new_music.folders.length === 1 ? '' : 's'} with new or changed tracks.
+          <button class="link inline" onclick={() => go('library')}>See them in Library →</button></p>
+      {:else}
+        <p class="muted">Nothing new since the previous scan.</p>
+      {/if}
+    </article>
+  {/if}
+
   <article class="panel card rise" style:animation-delay="120ms">
     <header><h2>Kept intact</h2><span class="eyebrow">never touched</span></header>
     <p class="muted">Releases that share audio but are distinct, so nothing in them is removed.</p>
@@ -198,6 +211,7 @@
   .tag { flex: none; font-size: 11.5px; color: var(--ink-3); }
   .link { all: unset; flex: 1; min-width: 0; display: flex; cursor: pointer; color: var(--ink); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
   .link:hover { text-decoration-color: var(--accent); }
+  .link.inline { display: inline; flex: none; margin-left: 6px; }
   input[type='checkbox'] { accent-color: var(--accent); }
 
   @media (max-width: 1000px) {

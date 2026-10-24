@@ -37,7 +37,7 @@ class Matches:
         return b in self.weak.get(a, ())
 
 
-def find_matches(tracks: list[Track], progress: bool = False) -> Matches:
+def find_matches(tracks: list[Track], progress: bool = False, on_progress=None, cancel=None) -> Matches:
     usable = sorted((t for t in tracks if t.usable), key=lambda t: (t.duration, t.path))
     weak = {t: t.weak for t in usable}
     m = Matches()
@@ -67,6 +67,11 @@ def find_matches(tracks: list[Track], progress: bool = False) -> Matches:
                 m.variants.append((a, b, c))
         if bar:
             bar.update()
+        if on_progress and i % 200 == 0:
+            on_progress('comparing', i, len(usable))
+        if cancel is not None and cancel.is_set():
+            from .scanner import ScanCancelled
+            raise ScanCancelled()
     if bar:
         bar.close()
     log.info("Compared %d pairs: %d tracks have a same-audio copy, %d edited-version pairs",

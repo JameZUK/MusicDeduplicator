@@ -51,3 +51,17 @@ def read_history(state_dir: str) -> list[dict]:
             return [json.loads(line) for line in f if line.strip()]
     except (OSError, ValueError):
         return []
+
+
+def record_scan(state_dir: str, entry: dict) -> None:
+    os.makedirs(state_dir, exist_ok=True)
+    with open(os.path.join(state_dir, 'scans.jsonl'), 'a', encoding='utf-8') as f:
+        f.write(json.dumps({'time': time.strftime('%Y-%m-%dT%H:%M:%S%z'), **entry}) + '\n')
+
+
+def read_scans(state_dir: str) -> list[dict]:
+    try:
+        with open(os.path.join(state_dir, 'scans.jsonl'), encoding='utf-8') as f:
+            return [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError):
+        return []

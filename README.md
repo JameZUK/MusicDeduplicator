@@ -143,6 +143,12 @@ musicdedup serve musicdedup-plan.json --move-to ~/Duplicates
   stretch. Both copies play in sync, and <kbd>A</kbd>/<kbd>B</kbd> switches between them
   instantly without losing your place. There's also auto-switching and a loop around
   the difference.
+- **Library:** collection statistics (tracks, size, playing time, artists, formats, bit depths,
+  sample rates, biggest artists and albums), what's **new since the last scan**, and a scan history.
+- **Rescan:** start `serve` with `--library FOLDER` and the dashboard can rescan for you, with live
+  progress and a Stop button. Stopping loses nothing: fingerprints are cached as they're made. Decisions
+  carry over to the new plan for groups that haven't changed. `--scan-on-start` begins a scan when
+  the server starts; without a plan yet, the dashboard shows the scan and loads the plan when it's done.
 - **Apply and undo:** preview exactly what will change, do a dry run, then move (or, with
   `--allow-delete`, delete). History lists every apply, from the dashboard or the CLI,
   with one-click undo for moves.
@@ -215,6 +221,7 @@ musicdedup apply PLAN (--move-to DIR | --delete) [--dry-run] [--yes] [--journal 
 musicdedup undo JOURNAL [--dry-run]
 musicdedup serve PLAN [--host ADDR] [--port 8650] [--move-to DIR] [--allow-delete]
                  [--auth none|authelia] [--allow CIDR] [--trusted-proxy CIDR] [--hostname NAME]
+                 [--library FOLDER] [--scan-on-start] [scan options: --exclude, --prefer, ...]
 musicdedup cache info|clear
 
 All commands: -v/--verbose, -q/--quiet, --log-file FILE

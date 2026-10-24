@@ -8,6 +8,7 @@ export const store = $state({
   decisions: { groups: {}, within: [] },
   saving: false,
   error: '',
+  scan: { state: 'idle' },
 });
 
 let saveTimer;

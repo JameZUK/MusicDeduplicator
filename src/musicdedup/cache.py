@@ -27,6 +27,7 @@ class CachedTrack:
     fingerprint: np.ndarray | None
     info: AudioInfo | None
     error: str | None
+    scanned_at: float = 0.0
 
 
 class Cache:
@@ -61,17 +62,27 @@ class Cache:
 
     def get(self, path: str, size: int, mtime_ns: int) -> CachedTrack | None:
         row = self.conn.execute(
-            'SELECT size, mtime_ns, duration, fingerprint, info, error FROM tracks WHERE path = ?',
+            'SELECT size, mtime_ns, duration, fingerprint, info, error, scanned_at FROM tracks WHERE path = ?',
             (path,)).fetchone()
         if not row or row[0] != size or row[1] != mtime_ns:
             return None
-        _, _, duration, blob, info, error = row
+        _, _, duration, blob, info, error, scanned_at = row
         fp = np.frombuffer(blob, dtype='<u4').astype(np.uint32) if blob is not None else None
         try:
             audio_info = AudioInfo.from_dict(json.loads(info)) if info else None
         except (ValueError, TypeError):
             return None
-        return CachedTrack(duration=duration or 0.0, fingerprint=fp, info=audio_info, error=error)
+        return CachedTrack(duration=duration or 0.0, fingerprint=fp, info=audio_info, error=error,
+                           scanned_at=scanned_at or 0.0)
+
+    def known(self, path: str) -> bool:
+        """True if the path was seen before (possibly with different contents)."""
+        return self.conn.execute('SELECT 1 FROM tracks WHERE path = ?', (path,)).fetchone() is not None
+
+    def count_under(self, under: str) -> int:
+        prefix = under.rstrip(os.sep) + os.sep
+        return self.conn.execute('SELECT COUNT(*) FROM tracks WHERE substr(path, 1, ?) = ?',
+                                 (len(prefix), prefix)).fetchone()[0]
 
     def put(self, path: str, size: int, mtime_ns: int, duration: float,
             fingerprint: np.ndarray | None, info: AudioInfo | None, error: str | None) -> None:

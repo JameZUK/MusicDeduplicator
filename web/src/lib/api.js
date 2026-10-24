@@ -36,6 +36,10 @@ export const api = {
   undo: (journal) => request('POST', 'undo', { journal }),
   job: (id) => request('GET', `jobs/${id}`),
   history: () => request('GET', 'history'),
+  scanState: () => request('GET', 'scan'),
+  scans: () => request('GET', 'scans'),
+  startScan: () => request('POST', 'scan', {}),
+  stopScan: () => request('POST', 'scan/cancel', {}),
 };
 
 export const audioUrl = (path) => `./api/audio?path=${encodeURIComponent(path)}`;
