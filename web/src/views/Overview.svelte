@@ -107,8 +107,8 @@
   </article>
 
   <article class="panel card rise" style:animation-delay="180ms">
-    <header><h2>Edited versions</h2><span class="eyebrow">{plan.edited_versions.length}</span></header>
-    <p class="muted">Same recording, different somewhere: explicit and clean, radio edits. Never treated as duplicates.</p>
+    <header><h2>Similar versions</h2><span class="eyebrow">{plan.edited_versions.length}</span></header>
+    <p class="muted">Same recording, different somewhere: explicit and clean edits, remasters, alternate mixes. Never treated as duplicates; compare and listen to see where.</p>
     <ul class="list">
       {#each plan.edited_versions.slice(0, 8) as v}
         <li>
@@ -125,7 +125,9 @@
 
   <article class="panel card rise" style:animation-delay="240ms">
     <header><h2>Couldn't read</h2><span class="eyebrow">{plan.unreadable.length} files</span></header>
-    <p class="muted">Possibly corrupt. A folder containing any of these is never removed.</p>
+    <p class="muted">Possibly corrupt. A folder containing any of these is never removed.
+      {#if plan.damaged?.length}<br />Another <strong>{plan.damaged.length.toLocaleString()}</strong> are damaged but playable
+        (a glitch somewhere, marked ⚠). Where there's a copy, the clean one is kept.{/if}</p>
     <ul class="list">
       {#each plan.unreadable.slice(0, 8) as u}
         <li title={u.error}><span class="clip">{r(u.path)}</span></li>

@@ -93,3 +93,20 @@ def test_batched_prefilter_never_rejects_what_the_pairwise_test_accepts():
     assert all(g for g, e in zip(got, expected, strict=True) if e)
     assert sum(got) <= sum(expected) + 2                  # and it still rejects unrelated tracks
     assert any(expected) and not all(got)
+
+
+def test_damaged_copy_with_a_skipped_stretch_is_same_only_when_allowed():
+    fp = make_fp(12, 1600)
+    skipped = np.concatenate([fp[:800], fp[803:]])          # three items lost at a damaged spot
+    assert compare(fp, skipped).kind != 'same'              # clean files: strict
+    c = compare(fp, skipped, allow_gap=True)
+    assert c.kind == 'same' and c.gap
+
+
+def test_an_edit_is_never_excused_as_a_gap():
+    fp = make_fp(13, 1600)
+    censored = edited(fp, 700, 12)                           # changed, not shifted
+    assert compare(fp, censored, allow_gap=True).kind == 'variant'
+    different = make_fp(14, 1600)
+    c = compare(fp, different, allow_gap=True)
+    assert c is None or c.kind == 'different'

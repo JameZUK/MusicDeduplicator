@@ -66,8 +66,49 @@ def fpcalc_version() -> str | None:
     return (r.stdout or r.stderr).strip() or 'fpcalc'
 
 
-def run_fpcalc(path: str, timeout: float = 300) -> tuple[float, np.ndarray]:
-    """Fingerprints the whole file. Returns (duration_seconds, fingerprint)."""
+# Appended to the error of a file that failed both ways, so a rescan doesn't retry it.
+FALLBACK_FAILED = '(also unreadable through ffmpeg)'
+FALLBACK_RATE = 11025
+
+
+def _parse_fpcalc(stdout: str) -> tuple[float, np.ndarray]:
+    try:
+        data = json.loads(stdout)
+        values = data['fingerprint']
+        duration = float(data['duration'])
+    except (ValueError, KeyError, TypeError) as e:
+        raise FingerprintError(f"unexpected fpcalc output: {e}") from e
+    # Older fpcalc versions print raw values as signed integers.
+    return duration, np.array(values, dtype=np.int64).astype(np.uint32)
+
+
+def _fpcalc_via_ffmpeg(path: str, timeout: float) -> tuple[float, np.ndarray]:
+    """Decodes with ffmpeg, skipping damaged frames, and fingerprints the raw audio.
+    fpcalc on its own gives up at the first decoding error, which a single bad frame
+    in an otherwise playable file causes."""
+    try:
+        pcm = subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-err_detect', 'ignore_err', '-i', path,
+                              '-vn', '-ac', '1', '-ar', str(FALLBACK_RATE), '-f', 's16le', '-'],
+                             capture_output=True, timeout=timeout).stdout
+        if len(pcm) < 2 * FALLBACK_RATE:
+            raise FingerprintError("no audio could be decoded")
+        r = subprocess.run(['fpcalc', '-raw', '-json', '-length', '0', '-format', 's16le',
+                            '-rate', str(FALLBACK_RATE), '-channels', '1', '-'],
+                           input=pcm, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise FingerprintTimeout(f"decoding timed out after {timeout:g}s") from e
+    except OSError as e:
+        raise FingerprintError(f"could not run ffmpeg: {e}") from e
+    if r.returncode != 0:
+        raise FingerprintError("fpcalc could not fingerprint the decoded audio")
+    _, fp = _parse_fpcalc(r.stdout.decode(errors='replace'))
+    # fpcalc can't know the duration of raw input; it's the amount of audio decoded.
+    return len(pcm) / (2 * FALLBACK_RATE), fp
+
+
+def run_fpcalc(path: str, timeout: float = 300) -> tuple[float, np.ndarray, bool]:
+    """Fingerprints the whole file. Returns (duration_seconds, fingerprint, damaged):
+    damaged means fpcalc couldn't decode it but ffmpeg could, skipping bad frames."""
     try:
         r = subprocess.run(['fpcalc', '-raw', '-json', '-length', '0', path],
                            capture_output=True, text=True, timeout=timeout)
@@ -75,18 +116,20 @@ def run_fpcalc(path: str, timeout: float = 300) -> tuple[float, np.ndarray]:
         raise FingerprintTimeout(f"fpcalc timed out after {timeout:g}s") from e
     except OSError as e:
         raise FingerprintError(f"could not run fpcalc: {e}") from e
-    if r.returncode != 0:
-        msg = (r.stderr or '').strip().splitlines()
-        raise FingerprintError(msg[-1] if msg else f"fpcalc exited with status {r.returncode}")
+    if r.returncode == 0:
+        duration, fp = _parse_fpcalc(r.stdout)
+        return duration, fp, False
+    msg = (r.stderr or '').strip().splitlines()
+    error = msg[-1] if msg else f"fpcalc exited with status {r.returncode}"
+    if not shutil.which('ffmpeg'):
+        raise FingerprintError(error)
     try:
-        data = json.loads(r.stdout)
-        values = data['fingerprint']
-        duration = float(data['duration'])
-    except (ValueError, KeyError, TypeError) as e:
-        raise FingerprintError(f"unexpected fpcalc output: {e}") from e
-    # Older fpcalc versions print raw values as signed integers.
-    fp = np.array(values, dtype=np.int64).astype(np.uint32)
-    return duration, fp
+        duration, fp = _fpcalc_via_ffmpeg(path, timeout)
+    except FingerprintTimeout:
+        raise
+    except FingerprintError as e:
+        raise FingerprintError(f"{error} {FALLBACK_FAILED}") from e
+    return duration, fp, True
 
 
 def is_low_information(fp: np.ndarray) -> bool:
@@ -104,6 +147,7 @@ class Comparison:
     max_block_ber: float  # worst ~2.5 s window
     offset: int         # alignment, in items (positive: a starts later)
     max_block_at: float = 0.0  # seconds into a where the worst window starts
+    gap: bool = False          # same audio apart from a damaged, skipped stretch
 
     @property
     def kind(self) -> str:
@@ -176,8 +220,62 @@ def prefilter_many(a: np.ndarray, bs: list[np.ndarray]) -> list[bool]:
     return out
 
 
-def compare(a: np.ndarray, b: np.ndarray) -> Comparison | None:
-    """Compares two fingerprints. Returns None if they can't be the same audio."""
+GAP_SEARCH = 8          # items (~1 s) either side when re-aligning after a damaged spot
+GAP_MAX_BAD_BLOCKS = 3  # ~7.5 s of damaged audio at most
+
+
+def _same_but_for_a_gap(a: np.ndarray, b: np.ndarray, offset: int) -> bool:
+    """For a copy known to be damaged: is it the same audio apart from one short damaged
+    spot? A decoder skipping bad frames shortens the audio after it, so the rest only
+    lines up again at a slightly different offset. Checked per ~2.5 s block: every block
+    must match well at one of two offsets (before and after the spot), with at most a
+    few bad blocks, all together, where the offset changes."""
+    blocks = min(len(a), len(b)) // BLOCK_ITEMS
+    if blocks < 4:
+        return False
+    best_ber, best_off = [], []
+    for k in range(blocks):
+        s = k * BLOCK_ITEMS
+        wa = a[s:s + BLOCK_ITEMS]
+        found = None
+        for o in range(offset - GAP_SEARCH, offset + GAP_SEARCH + 1):
+            lo = s - o
+            if lo < 0 or lo + BLOCK_ITEMS > len(b):
+                continue
+            ber = float(_popcount(wa ^ b[lo:lo + BLOCK_ITEMS]).sum() / (32.0 * BLOCK_ITEMS))
+            if found is None or ber < found[0]:
+                found = (ber, o)
+        if found is None:
+            return False
+        best_ber.append(found[0])
+        best_off.append(found[1])
+    bad = [k for k, ber in enumerate(best_ber) if ber > SAME_MAX_BLOCK_BER]
+    if len(bad) > GAP_MAX_BAD_BLOCKS or (bad and bad[-1] - bad[0] >= len(bad) + 1):
+        return False
+    good = [k for k in range(blocks) if k not in bad]
+    if not good or float(np.mean([best_ber[k] for k in good])) > SAME_MAX_BER:
+        return False
+    # Good blocks: one offset before the spot and one after (ignore near-silent blocks,
+    # whose best offset is arbitrary).
+    # The signature of skipped frames: one offset before the spot and a different one
+    # after it. Without that shift it's a change to the audio itself (an edit), which
+    # this never excuses. Near-silent blocks are ignored: their best offset is arbitrary.
+    sure = [k for k in good if best_ber[k] < SAME_MAX_BER]
+    seq = [best_off[k] for k in sure]
+    changes = [i for i in range(1, len(seq)) if seq[i] != seq[i - 1]]
+    if len(changes) != 1:
+        return False
+    switch = sure[changes[0]]
+    if bad and not (sure[changes[0] - 1] < bad[0] and switch > bad[-1]):
+        return False   # the shift must happen across the damaged spot
+    return True
+
+
+def compare(a: np.ndarray, b: np.ndarray, allow_gap: bool = False) -> Comparison | None:
+    """Compares two fingerprints. Returns None if they can't be the same audio.
+    allow_gap: one of them is known to be damaged, so a single skipped stretch is
+    tolerated (see _same_but_for_a_gap). Never set it for two clean files: a deliberate
+    edit that cuts something out would then look like the same audio."""
     if min(len(a), len(b)) < MIN_ITEMS:
         return None
     found = _best_offset(a, b)
@@ -198,7 +296,12 @@ def compare(a: np.ndarray, b: np.ndarray) -> Comparison | None:
         at = (worst * BLOCK_ITEMS + max(offset, 0)) * ITEM_SECONDS
     else:
         max_block, at = ber, 0.0
-    return Comparison(ber=ber, max_block_ber=max_block, offset=offset, max_block_at=at)
+    c = Comparison(ber=ber, max_block_ber=max_block, offset=offset, max_block_at=at)
+    if allow_gap and c.kind != 'same' and ber <= 2 * VARIANT_MAX_BER and _same_but_for_a_gap(a, b, offset):
+        # Report it as same audio; the damage itself is shown elsewhere (the file is flagged).
+        return Comparison(ber=min(ber, SAME_MAX_BER), max_block_ber=min(max_block, SAME_MAX_BLOCK_BER),
+                          offset=offset, max_block_at=at, gap=True)
+    return c
 
 
 def compare_profile(a: np.ndarray, b: np.ndarray) -> dict | None:

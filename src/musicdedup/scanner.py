@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import logging
 import os
+import shutil
 import stat
 import threading
 import time
@@ -17,7 +19,7 @@ import numpy as np
 
 from .audio import AudioInfo, is_audio, read_audio_info
 from .cache import Cache
-from .fingerprint import FingerprintError, FingerprintTimeout, is_low_information, run_fpcalc
+from .fingerprint import FALLBACK_FAILED, FingerprintError, FingerprintTimeout, is_low_information, run_fpcalc
 
 log = logging.getLogger(__name__)
 
@@ -172,11 +174,14 @@ def _walk(roots: list[str], excludes: list[str], exclude_paths: list[str],
 def _analyse(path: str, fingerprint_fn: FingerprintFn, info_fn: InfoFn):
     info = info_fn(path)
     try:
-        duration, fp = fingerprint_fn(path)
+        result = fingerprint_fn(path)
     except FingerprintTimeout as e:
         return info, 0.0, None, str(e), True
     except FingerprintError as e:
         return info, 0.0, None, str(e), False
+    duration, fp = result[0], result[1]
+    if len(result) > 2 and result[2]:   # decoded only by skipping damaged frames
+        info = dataclasses.replace(info, damaged=True)
     return info, duration, fp, None, False
 
 
@@ -184,13 +189,16 @@ def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
          excludes: list[str] | None = None, exclude_paths: list[str] | None = None,
          fingerprint_fn: FingerprintFn = run_fpcalc, info_fn: InfoFn = read_audio_info,
          progress: bool = False, on_progress: ProgressFn | None = None,
-         cancel: threading.Event | None = None, new_since: float | None = None) -> ScanResult:
+         cancel: threading.Event | None = None, new_since: float | None = None,
+         retry_errors: bool | None = None) -> ScanResult:
     """Walks and fingerprints. `on_progress` is called as work proceeds; setting
     `cancel` stops the scan with ScanCancelled (finished work stays cached).
     `new_since` is when the previous *completed* scan ran: files first fingerprinted
     after it count as new even if a stopped scan did the work."""
     roots = [os.path.realpath(r) for r in roots]
     exclude_paths = [os.path.realpath(p) for p in exclude_paths or []]
+    if retry_errors is None:
+        retry_errors = fingerprint_fn is run_fpcalc and shutil.which('ffmpeg') is not None
     skipped: Counter = Counter()
     stats: Counter = Counter()
     stats['first scan'] = int(all(cache.count_under(r) == 0 for r in roots))
@@ -202,6 +210,12 @@ def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
         if t.hardlink_of:
             continue
         cached = cache.get(t.path, t.size, t.mtime_ns)
+        if cached and cached.error and FALLBACK_FAILED not in cached.error and retry_errors:
+            # Failed before the ffmpeg fallback existed: worth one more try. The file
+            # itself is unchanged, so it keeps its status.
+            stats['unreadable files retried'] += 1
+            todo.append(t)
+            continue
         if cached:
             t.duration, t.fingerprint, t.info, t.error = (
                 cached.duration, cached.fingerprint, cached.info, cached.error)

@@ -40,19 +40,24 @@ class AudioInfo:
     title: str = ''
     track: int = 0
     disc: int = 0
+    damaged: bool = False   # decodable only by skipping bad frames (a glitch somewhere)
 
     def quality(self) -> tuple:
         """Sortable format quality: higher is better. Lossless beats lossy, then
         resolution, then bitrate. File size is deliberately not part of it: copies
         that differ only in tags differ by a few bytes."""
+        # A damaged copy ranks below a clean one of the same kind, but a damaged lossless
+        # copy still beats any lossy one: one glitch isn't worth trading lossless away for.
+        clean = int(not self.damaged)
         if self.lossless:
-            return (1, self.bits or 16, self.sample_rate, self.channels, 0)
-        return (0, 0, 0, self.channels, self.bitrate)
+            return (1, clean, self.bits or 16, self.sample_rate, self.channels, 0)
+        return (0, clean, 0, 0, self.channels, self.bitrate)
 
     def describe(self) -> str:
+        damaged = ' (damaged)' if self.damaged else ''
         if self.lossless:
-            return f"lossless {self.bits or '?'}-bit/{self.sample_rate / 1000:g}kHz"
-        return f"lossy {round(self.bitrate / 1000)}kbps"
+            return f"lossless {self.bits or '?'}-bit/{self.sample_rate / 1000:g}kHz{damaged}"
+        return f"lossy {round(self.bitrate / 1000)}kbps{damaged}"
 
     def to_dict(self) -> dict:
         return asdict(self)

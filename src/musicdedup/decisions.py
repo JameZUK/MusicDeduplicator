@@ -26,9 +26,10 @@ class DecisionError(Exception):
 
 
 def _quality(track: dict) -> tuple:
+    clean = int(not track.get('damaged'))
     if track.get('lossless'):
-        return (1, track.get('bits') or 16, track.get('sample_rate') or 0, 0)
-    return (0, 0, 0, track.get('bitrate') or 0)
+        return (1, clean, track.get('bits') or 16, track.get('sample_rate') or 0, 0)
+    return (0, clean, 0, 0, track.get('bitrate') or 0)
 
 
 def _ref(track: dict) -> dict:

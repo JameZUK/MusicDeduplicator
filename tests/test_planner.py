@@ -198,3 +198,21 @@ def test_plan_is_deterministic(lib):
         again = build_plan(result, find_matches(result.tracks))
         assert [r['path'] for r in again['removals']] == [r['path'] for r in plan['removals']]
         assert [g['keep'] for g in again['groups']] == [g['keep'] for g in plan['groups']]
+
+
+def test_clean_copy_is_kept_over_a_damaged_one(lib):
+    from musicdedup.audio import AudioInfo
+    damaged16 = AudioInfo(**{**FLAC16.to_dict(), 'damaged': True})
+    lib.album('A/Album damaged', [1, 2], damaged16)
+    lib.album('B/Album', [1, 2], FLAC16)
+    _, _, plan = lib.scan()
+    assert kept_folders(plan) == {'B/Album'} and removed_folders(plan) == {'A/Album damaged'}
+
+
+def test_damaged_lossless_is_not_swapped_for_clean_lossy(lib):
+    from musicdedup.audio import AudioInfo
+    damaged16 = AudioInfo(**{**FLAC16.to_dict(), 'damaged': True})
+    lib.album('A/Album flac', [1, 2], damaged16)
+    lib.album('B/Album mp3', [1, 2], MP3_320, transform=lambda fp: noisy(fp, 0.02), ext='mp3')
+    _, _, plan = lib.scan()
+    assert kept_folders(plan) == {'A/Album flac'} and removed_folders(plan) == {'B/Album mp3'}

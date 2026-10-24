@@ -108,7 +108,8 @@ def _compare_range(usable: list[Track], weak: np.ndarray, durations: np.ndarray,
         # The exact comparison decides, only for the few pairs that passed the probe test.
         for k in maybe_idx:
             b = usable[i + 1 + int(k)]
-            c = compare(a.fingerprint, b.fingerprint)
+            damaged = bool((a.info and a.info.damaged) or (b.info and b.info.damaged))
+            c = compare(a.fingerprint, b.fingerprint, allow_gap=damaged)
             if c is None:
                 continue
             if c.kind == 'same':

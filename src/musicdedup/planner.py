@@ -46,10 +46,10 @@ def _ref(t: Track) -> dict:
 
 def _quality_score(t: Track) -> int:
     """Track.quality() as a number that can be summed over a folder."""
-    lossless, bits, rate, channels, bitrate = t.quality()
+    lossless, clean, bits, rate, channels, bitrate = t.quality()
     if lossless:
-        return 10**12 + bits * 10**9 + rate * 10 + channels
-    return channels * 10**7 + bitrate
+        return 10**12 + clean * 10**11 + bits * 10**9 + rate * 10 + channels
+    return clean * 10**8 + channels * 10**7 + bitrate
 
 
 def _format_time(seconds: float) -> str:
@@ -307,7 +307,7 @@ class _Planner:
                     **_ref(t), 'duration': round(t.duration, 2), 'error': t.error,
                     'quality': t.info.describe() if t.info else 'unknown',
                     **({k: getattr(t.info, k) for k in ('lossless', 'bits', 'sample_rate', 'bitrate',
-                                                        'artist', 'album', 'title', 'track', 'disc')}
+                                                        'artist', 'album', 'title', 'track', 'disc', 'damaged')}
                        if t.info else {}),
                 } for t in tracks],
                 'extras': [{'path': e.path, 'size': e.size, 'mtime_ns': e.mtime_ns} for e in folder.extras],
@@ -399,6 +399,7 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
     removals = [r for r in removals if r not in bad]
     unreadable = sorted(({'path': t.path, 'error': t.error} for t in scan.tracks if t.error),
                         key=lambda x: x['path'])
+    damaged = sorted(t.path for t in scan.tracks if t.info and t.info.damaged and not t.error)
     audio = [r for r in removals if r['reason'] != 'extra']
     quality: dict[str, int] = defaultdict(int)
     formats: dict[str, int] = defaultdict(int)
@@ -433,6 +434,7 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
             'repeated_tracks_kept': len(p.repeated),
             'edited_versions': len(matches.variants),
             'unreadable_audio_files': len(unreadable),
+            'damaged_audio_files': len(damaged),
             'blocked_folders': len(p.blocked),
             **{k: v for k, v in scan.skipped.items()},
             **{k: v for k, v in scan.stats.items()},
@@ -446,6 +448,7 @@ def build_plan(scan: ScanResult, matches: Matches, options: Options | None = Non
         'edited_versions': p.variants(),
         'shared_tracks': p.overlaps(),
         'unreadable': unreadable,
+        'damaged': damaged,
         'folders': p.folder_details(),
         'library': _library_stats(scan),
         'new_music': _new_music(scan),

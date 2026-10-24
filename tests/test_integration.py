@@ -234,3 +234,31 @@ def test_new_music_after_a_stopped_scan(library, tmp_path):
     nm = plan['new_music']
     assert nm['first_scan'] is False and nm['new_tracks'] == 1
     assert [os.path.relpath(f['folder'], lib) for f in nm['folders']] == ['Artist/Later']
+
+
+def test_damaged_file_is_fingerprinted_through_ffmpeg(library, tmp_path):
+    from musicdedup.cache import Cache
+    from musicdedup.fingerprint import run_fpcalc
+    from musicdedup.matcher import find_matches
+    from musicdedup.scanner import scan
+
+    lib = tmp_path / 'lib'
+    shutil.copytree(f'{library}/Artist/Album', lib / 'Album')
+    os.makedirs(lib / 'Damaged copy')
+    for name in sorted(os.listdir(lib / 'Album')):
+        write_audio(str(lib / 'Damaged copy' / (name[:-5] + '.mp3')), melody(int(name[:2])), MP3)
+    victim = lib / 'Damaged copy' / '02.mp3'
+    data = bytearray(victim.read_bytes())
+    mid = len(data) // 2
+    data[mid:mid + 4000] = bytes((i * 37) % 256 for i in range(4000))
+    victim.write_bytes(bytes(data))
+
+    duration, fp, damaged = run_fpcalc(str(victim))
+    assert damaged and 39 < duration < 41
+    cache = Cache(str(tmp_path / 'c.db'))
+    result = scan([str(lib)], cache)
+    t = next(t for t in result.tracks if t.path.endswith('02.mp3'))
+    assert t.usable and t.info.damaged and not t.error
+    matches = find_matches(result.tracks)
+    assert any(o.path.endswith('Album/02.flac') for o in matches.same[t])
+    cache.close()

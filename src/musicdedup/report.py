@@ -97,8 +97,8 @@ def format_report(plan: dict, limit: int | None = 25) -> str:
 
     variants = plan['edited_versions']
     if variants:
-        add(f"Edited versions (same recording, different somewhere, e.g. explicit/clean): {len(variants)}."
-            " These are never treated as duplicates.")
+        add(f"Similar versions (same recording, different somewhere: edits, remasters, alternate mixes):"
+            f" {len(variants)}. These are never treated as duplicates.")
         for v in capped(variants)[:10]:
             a, b = v['paths']
             add(f"  {_rel(a, roots)}")
@@ -122,6 +122,11 @@ def format_report(plan: dict, limit: int | None = 25) -> str:
             add(f"  {_rel(u['path'], roots)}: {u['error']}")
         if len(shown) < len(unreadable):
             add(f"    … and {len(unreadable) - len(shown)} more (see the plan file, or use --full-report)")
+        add('')
+
+    if s.get('damaged_audio_files'):
+        add(f"Damaged but playable (decoded by skipping bad frames): {s['damaged_audio_files']}."
+            " Where there's another copy, the clean one is kept.")
         add('')
 
     add(f"Plan: remove {s['files_to_remove']} files ({s['audio_files_to_remove']} audio), "

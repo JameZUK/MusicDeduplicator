@@ -98,7 +98,7 @@ Duplicate folders: 3 folder(s) duplicate or are contained in another.
       remove  Downloads/Album  (same album, 298.1 MB)
   ...
 Kept intact: smaller editions whose tracks are all in a bigger edition ...
-Edited versions (same recording, different somewhere, e.g. explicit/clean): 2 ...
+Similar versions (same recording, different somewhere: edits, remasters, alternate mixes): 2 ...
 Audio files that could not be read (possibly corrupt): 4 ...
 
 Plan: remove 25 files (22 audio), freeing 635.0 MB.
@@ -191,6 +191,7 @@ the usual `auth_request` settings.
 | The same track twice in one folder by accident (FLAC + MP3, `Song (1).flac`, same track number) | Reported. Add `--within-folders` to remove the extra copy |
 | An album that repeats a track on purpose (different track numbers) | Kept intact |
 | A folder containing an unreadable or corrupt audio file | Never removed. Corrupt files are listed |
+| A damaged but playable file (a glitch the decoder skips) | Still matched, by decoding through ffmpeg. Where there's a copy, the clean one is kept; a damaged lossless copy still beats a clean lossy one |
 | Silence, very short tracks | Never used as evidence of a duplicate on their own |
 | Symlinks, hard links | Ignored (they aren't extra copies) |
 

@@ -5,6 +5,7 @@
   const tier = $derived.by(() => {
     if (!track) return 'unknown';
     if (track.error) return 'broken';
+    if (track.damaged) return 'damaged';
     if (track.lossless) return (track.bits || 16) > 16 || (track.sample_rate || 0) > 48000 ? 'hires' : 'cd';
     return track.bitrate ? 'lossy' : 'unknown';
   });
@@ -12,6 +13,7 @@
     if (label) return label;
     if (!track) return '—';
     if (track.error) return 'unreadable';
+    if (track.damaged) return `${track.lossless ? `${track.bits || '?'}/${(track.sample_rate || 0) / 1000}` : `${Math.round((track.bitrate || 0) / 1000)}k`} ⚠`;
     if (track.lossless) return `${track.bits || '?'}/${(track.sample_rate || 0) / 1000}`;
     return track.bitrate ? `${Math.round(track.bitrate / 1000)}k` : '?';
   });
@@ -36,4 +38,5 @@
   .lossy { color: var(--ink-2); }
   .unknown { color: var(--ink-3); border-style: dashed; }
   .broken { color: var(--remove); background: var(--remove-soft); }
+  .damaged { color: var(--accent); border-style: dashed; }
 </style>
