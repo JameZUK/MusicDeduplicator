@@ -253,8 +253,10 @@ def test_damaged_file_is_fingerprinted_through_ffmpeg(library, tmp_path):
     data[mid:mid + 4000] = bytes((i * 37) % 256 for i in range(4000))
     victim.write_bytes(bytes(data))
 
-    duration, fp, damaged = run_fpcalc(str(victim))
-    assert damaged and 39 < duration < 41
+    duration, fp, damaged, decoder = run_fpcalc(str(victim))
+    assert damaged and decoder == 'ffmpeg' and 39 < duration < 41
+    clean = run_fpcalc(f'{lib}/Album/01.flac')
+    assert clean[2] is False and clean[3] == 'fpcalc'
     cache = Cache(str(tmp_path / 'c.db'))
     result = scan([str(lib)], cache)
     t = next(t for t in result.tracks if t.path.endswith('02.mp3'))

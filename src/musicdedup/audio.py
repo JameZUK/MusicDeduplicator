@@ -41,6 +41,7 @@ class AudioInfo:
     track: int = 0
     disc: int = 0
     damaged: bool = False   # decodable only by skipping bad frames (a glitch somewhere)
+    decoder: str = ''       # 'ffmpeg' if fpcalc couldn't read it ('' = fpcalc, or not recorded)
 
     def quality(self) -> tuple:
         """Sortable format quality: higher is better. Lossless beats lossy, then

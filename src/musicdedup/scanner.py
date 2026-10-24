@@ -180,8 +180,10 @@ def _analyse(path: str, fingerprint_fn: FingerprintFn, info_fn: InfoFn):
     except FingerprintError as e:
         return info, 0.0, None, str(e), False
     duration, fp = result[0], result[1]
-    if len(result) > 2 and result[2]:   # decoded only by skipping damaged frames
-        info = dataclasses.replace(info, damaged=True)
+    if len(result) > 2:
+        # (duration, fp, damaged[, decoder]); test doubles may return just two.
+        info = dataclasses.replace(info, damaged=bool(result[2]),
+                                   decoder=result[3] if len(result) > 3 else info.decoder)
     return info, duration, fp, None, False
 
 
@@ -214,6 +216,12 @@ def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
             # Failed before the ffmpeg fallback existed: worth one more try. The file
             # itself is unchanged, so it keeps its status.
             stats['unreadable files retried'] += 1
+            todo.append(t)
+            continue
+        if cached and cached.info and cached.info.damaged and not cached.info.decoder and retry_errors:
+            # Marked damaged by a version that flagged every fallback file, damaged or
+            # not; check it properly once.
+            stats['damaged files rechecked'] += 1
             todo.append(t)
             continue
         if cached:

@@ -82,14 +82,15 @@ def _parse_fpcalc(stdout: str) -> tuple[float, np.ndarray]:
     return duration, np.array(values, dtype=np.int64).astype(np.uint32)
 
 
-def _fpcalc_via_ffmpeg(path: str, timeout: float) -> tuple[float, np.ndarray]:
+def _fpcalc_via_ffmpeg(path: str, timeout: float) -> tuple[float, np.ndarray, bool]:
     """Decodes with ffmpeg, skipping damaged frames, and fingerprints the raw audio.
     fpcalc on its own gives up at the first decoding error, which a single bad frame
     in an otherwise playable file causes."""
     try:
-        pcm = subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-err_detect', 'ignore_err', '-i', path,
-                              '-vn', '-ac', '1', '-ar', str(FALLBACK_RATE), '-f', 's16le', '-'],
-                             capture_output=True, timeout=timeout).stdout
+        ff = subprocess.run(['ffmpeg', '-v', 'error', '-nostdin', '-err_detect', 'ignore_err', '-i', path,
+                             '-vn', '-ac', '1', '-ar', str(FALLBACK_RATE), '-f', 's16le', '-'],
+                            capture_output=True, timeout=timeout)
+        pcm = ff.stdout
         if len(pcm) < 2 * FALLBACK_RATE:
             raise FingerprintError("no audio could be decoded")
         r = subprocess.run(['fpcalc', '-raw', '-json', '-length', '0', '-format', 's16le',
@@ -102,13 +103,17 @@ def _fpcalc_via_ffmpeg(path: str, timeout: float) -> tuple[float, np.ndarray]:
     if r.returncode != 0:
         raise FingerprintError("fpcalc could not fingerprint the decoded audio")
     _, fp = _parse_fpcalc(r.stdout.decode(errors='replace'))
+    # Damaged only if ffmpeg itself hit bad data; many files fpcalc rejects decode
+    # cleanly (older fpcalc builds are stricter than ffmpeg).
+    damaged = bool(ff.stderr.strip())
     # fpcalc can't know the duration of raw input; it's the amount of audio decoded.
-    return len(pcm) / (2 * FALLBACK_RATE), fp
+    return len(pcm) / (2 * FALLBACK_RATE), fp, damaged
 
 
-def run_fpcalc(path: str, timeout: float = 300) -> tuple[float, np.ndarray, bool]:
-    """Fingerprints the whole file. Returns (duration_seconds, fingerprint, damaged):
-    damaged means fpcalc couldn't decode it but ffmpeg could, skipping bad frames."""
+def run_fpcalc(path: str, timeout: float = 300) -> tuple[float, np.ndarray, bool, str]:
+    """Fingerprints the whole file. Returns (duration_seconds, fingerprint, damaged,
+    decoder): decoder is 'ffmpeg' when fpcalc couldn't read it and ffmpeg did, and
+    damaged means ffmpeg had to skip bad data to do so."""
     try:
         r = subprocess.run(['fpcalc', '-raw', '-json', '-length', '0', path],
                            capture_output=True, text=True, timeout=timeout)
@@ -118,18 +123,18 @@ def run_fpcalc(path: str, timeout: float = 300) -> tuple[float, np.ndarray, bool
         raise FingerprintError(f"could not run fpcalc: {e}") from e
     if r.returncode == 0:
         duration, fp = _parse_fpcalc(r.stdout)
-        return duration, fp, False
+        return duration, fp, False, 'fpcalc'
     msg = (r.stderr or '').strip().splitlines()
     error = msg[-1] if msg else f"fpcalc exited with status {r.returncode}"
     if not shutil.which('ffmpeg'):
         raise FingerprintError(error)
     try:
-        duration, fp = _fpcalc_via_ffmpeg(path, timeout)
+        duration, fp, damaged = _fpcalc_via_ffmpeg(path, timeout)
     except FingerprintTimeout:
         raise
     except FingerprintError as e:
         raise FingerprintError(f"{error} {FALLBACK_FAILED}") from e
-    return duration, fp, True
+    return duration, fp, damaged, 'ffmpeg'
 
 
 def is_low_information(fp: np.ndarray) -> bool:
