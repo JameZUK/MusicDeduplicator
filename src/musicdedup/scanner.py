@@ -6,6 +6,7 @@ import fnmatch
 import logging
 import os
 import stat
+import time
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,6 +19,8 @@ from .cache import Cache
 from .fingerprint import FingerprintError, FingerprintTimeout, is_low_information, run_fpcalc
 
 log = logging.getLogger(__name__)
+
+PROGRESS_LOG_SECONDS = 60
 
 # Folders that are never music: NAS metadata, recycle bins, hidden folders.
 SKIP_DIR_NAMES = frozenset({'@eaDir', '#recycle', '#snapshot', '$RECYCLE.BIN',
@@ -82,6 +85,11 @@ class ScanResult:
 # fingerprint_fn(path) -> (duration, fingerprint); info_fn(path) -> AudioInfo.
 FingerprintFn = Callable[[str], tuple[float, np.ndarray]]
 InfoFn = Callable[[str], AudioInfo]
+
+
+def _duration(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    return f"{minutes // 60}h{minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m"
 
 
 def _skip_dir(name: str, rel: str, excludes: list[str]) -> bool:
@@ -189,6 +197,7 @@ def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
             from tqdm import tqdm
             bar = tqdm(total=len(todo), unit='file', desc='Fingerprinting')
         pool = ThreadPoolExecutor(max_workers=workers or os.cpu_count() or 2)
+        started = last_report = time.monotonic()
         try:
             futures = {pool.submit(_analyse, t.path, fingerprint_fn, info_fn): t for t in todo}
             for fut in as_completed(futures):
@@ -199,6 +208,13 @@ def scan(roots: list[str], cache: Cache, *, workers: int | None = None,
                     cache.put(t.path, t.size, t.mtime_ns, t.duration, t.fingerprint, t.info, t.error)
                 if bar:
                     bar.update()
+                elif time.monotonic() - last_report >= PROGRESS_LOG_SECONDS:
+                    # No progress bar (e.g. not a terminal): log progress for unattended runs.
+                    last_report = time.monotonic()
+                    done = stats['fingerprinted']
+                    rate = done / (last_report - started)
+                    log.info("Fingerprinted %d of %d files (%.1f/s, about %s left)", done, len(todo), rate,
+                             _duration((len(todo) - done) / rate if rate else 0))
         except KeyboardInterrupt:
             pool.shutdown(wait=False, cancel_futures=True)
             cache.commit()

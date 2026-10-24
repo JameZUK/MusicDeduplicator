@@ -100,3 +100,12 @@ def test_cache_prune_removes_deleted_files(lib, tmp_path):
     assert result.stats['stale cache entries pruned'] == 1
     assert cache.stats()['entries'] == 1
     cache.close()
+
+
+def test_progress_is_logged_without_a_progress_bar(lib, monkeypatch, caplog):
+    from musicdedup import scanner
+    monkeypatch.setattr(scanner, 'PROGRESS_LOG_SECONDS', 0)
+    lib.album('A/Album', [1, 2, 3])
+    with caplog.at_level('INFO', logger='musicdedup.scanner'):
+        lib.scan()
+    assert any('Fingerprinted 3 of 3 files' in r.message for r in caplog.records)
