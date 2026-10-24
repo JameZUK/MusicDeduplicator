@@ -116,7 +116,14 @@ musicdedup undo ~/Duplicates/musicdedup-journal-20261024-084704.jsonl    # chang
 ```
 
 `--delete` removes files permanently instead, and asks you to type `delete` to
-confirm. Before acting on each file, `apply` checks that the file and the copy being
+confirm.
+
+If you scanned through a different (for example read-only) mount of the same files,
+`--act-on SCANNED=LIVE` applies the plan to the live copy, e.g.
+`--act-on /mnt/music-ro=/srv/music`. Every file is re-checked there (size and modification
+time) before anything is done. The quarantine folder may then be a *hidden* folder inside
+the library, such as `/srv/music/.musicdedup-quarantine`, because scans never look inside
+hidden folders. Before acting on each file, `apply` checks that the file and the copy being
 kept both still exist and haven't changed since the scan. Anything that fails a
 check is skipped and listed.
 

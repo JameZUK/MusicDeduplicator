@@ -51,7 +51,7 @@ class App:
     def __init__(self, plan_path: str, policy: AccessPolicy, *, state_dir: str, cache_path: str | None,
                  move_to: str | None, allow_delete: bool, library: list[str] | None = None,
                  excludes: list[str] | None = None, scan_options: Options | None = None,
-                 workers: int | None = None):
+                 workers: int | None = None, act_on: dict[str, str] | None = None):
         self.plan_path = os.path.abspath(plan_path)
         self.policy = policy
         self.state_dir = state_dir
@@ -62,6 +62,7 @@ class App:
         self.excludes = excludes or []
         self.scan_options = scan_options or Options()
         self.workers = workers
+        self.act_on = act_on or {}
         self.jobs: dict[str, dict] = {}
         self.scan_state: dict = {'state': 'idle'}
         self._cancel = threading.Event()
@@ -384,7 +385,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json({'csrf': app.policy.csrf_token, 'user': self.user, 'auth': app.policy.mode,
                     'version': __version__, 'move_to': app.move_to, 'allow_delete': app.allow_delete,
                     'plan_path': app.plan_path, 'has_plan': app.plan is not None,
-                    'can_scan': bool(app.library), 'library': app.library})
+                    'can_scan': bool(app.library), 'library': app.library, 'act_on': app.act_on})
 
     def get_plan(self, q):
         self.app.reload()
@@ -543,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
         user = self.user or f"{self.client_address[0]} (no login)"
         dry_run = bool(body.get('dry_run'))
         jid = app.start_job('apply', lambda: apply_plan(new, mode=mode, move_to=app.move_to, dry_run=dry_run,
-                                                        state_dir=app.state_dir, user=user))
+                                                        state_dir=app.state_dir, user=user, act_on=app.act_on))
         self._json({'job': jid}, 202)
 
     def post_undo(self, q):

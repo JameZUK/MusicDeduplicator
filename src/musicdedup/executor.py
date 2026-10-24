@@ -53,6 +53,35 @@ def _inside(path: str, root: str) -> bool:
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def _hidden_below(path: str, root: str) -> bool:
+    """True if some folder between root and path starts with '.', which scans skip."""
+    return any(part.startswith('.') for part in os.path.relpath(path, root).split(os.sep))
+
+
+def map_plan(plan: dict, act_on: dict[str, str] | None) -> dict:
+    """A copy of the plan with paths under each scanned folder moved to where the
+    same files are acted on, e.g. a read-only scan mount -> the live library. Every
+    file is still re-checked (size and mtime) at its new path before anything is done."""
+    if not act_on:
+        return plan
+    pairs = sorted(((os.path.realpath(k).rstrip(os.sep), v.rstrip(os.sep)) for k, v in act_on.items()),
+                   key=lambda kv: -len(kv[0]))
+
+    def live(path: str) -> str:
+        for scanned, target in pairs:
+            if _inside(path, scanned):
+                return target + path[len(scanned):]
+        return path
+
+    def ref(r: dict | None) -> dict | None:
+        return None if r is None else {**r, 'path': live(r['path'])}
+
+    out = dict(plan)
+    out['roots'] = [live(os.path.realpath(r)) for r in plan['roots']]
+    out['removals'] = [{**r, 'path': live(r['path']), 'keep': ref(r.get('keep'))} for r in plan['removals']]
+    return out
+
+
 def _root_labels(roots: list[str]) -> dict[str, str]:
     labels, used = {}, set()
     for r in roots:
@@ -93,34 +122,28 @@ def _unique_destination(dst: str) -> str:
 
 
 def move_file(src: str, dst: str) -> None:
-    """Moves src to dst without ever replacing an existing dst."""
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    try:
-        os.link(src, dst)           # fails with EEXIST rather than overwriting
-    except OSError as e:
-        if e.errno == errno.EEXIST:
-            raise
-        if os.stat(src).st_dev == os.stat(os.path.dirname(dst)).st_dev:
-            if os.path.lexists(dst):  # filesystem without hard links
-                raise FileExistsError(errno.EEXIST, 'destination exists', dst) from e
-            os.rename(src, dst)
-            return
-        # Different filesystem: exclusive-create copy, verify, then remove the source.
-        with open(src, 'rb') as fin, open(dst, 'xb') as fout:
-            shutil.copyfileobj(fin, fout, 1 << 20)
-            fout.flush()
-            os.fsync(fout.fileno())
-        shutil.copystat(src, dst)
-        if os.path.getsize(dst) != os.path.getsize(src):
-            os.unlink(dst)
-            raise OSError(errno.EIO, 'copy verification failed', dst) from e
-        os.unlink(src)
+    """Moves src to dst without ever replacing an existing dst.
+
+    On one filesystem it is a rename, after checking dst doesn't exist. (A rename,
+    not a hard link: through a mergerfs union a rename moves the file on every branch
+    that holds it, whereas a link can half-succeed across branches.) Across
+    filesystems it is an exclusive-create copy, verified, then the source removed."""
+    parent = os.path.dirname(dst)
+    os.makedirs(parent, exist_ok=True)
+    if os.lstat(src).st_dev == os.stat(parent).st_dev:
+        if os.path.lexists(dst):
+            raise FileExistsError(errno.EEXIST, 'destination exists', dst)
+        os.rename(src, dst)
         return
-    try:
-        os.unlink(src)
-    except OSError:
+    with open(src, 'rb') as fin, open(dst, 'xb') as fout:
+        shutil.copyfileobj(fin, fout, 1 << 20)
+        fout.flush()
+        os.fsync(fout.fileno())
+    shutil.copystat(src, dst)
+    if os.path.getsize(dst) != os.path.getsize(src):
         os.unlink(dst)
-        raise
+        raise OSError(errno.EIO, 'copy verification failed', dst)
+    os.unlink(src)
 
 
 class _Journal:
@@ -144,9 +167,11 @@ class _Journal:
 
 def apply_plan(plan: dict, *, mode: str, move_to: str | None = None, dry_run: bool = False,
                journal_path: str | None = None, state_dir: str | None = None,
-               user: str | None = None) -> Result:
+               user: str | None = None, act_on: dict[str, str] | None = None) -> Result:
     """Carries out a plan. With state_dir, takes the shared apply lock (so the CLI
-    and the dashboard never apply at once) and records the run in the history."""
+    and the dashboard never apply at once) and records the run in the history.
+    act_on maps scanned folders to the folders to act on (see map_plan)."""
+    plan = map_plan(plan, act_on)
     if state_dir is None or dry_run:
         return _apply_plan(plan, mode, move_to, dry_run, journal_path, user)
     try:
@@ -176,8 +201,9 @@ def _apply_plan(plan: dict, mode: str, move_to: str | None, dry_run: bool,
             raise PlanError("a destination folder is required to move duplicates")
         move_to = os.path.realpath(move_to)
         for r in roots:
-            if _inside(move_to, r) or _inside(r, move_to):
-                raise PlanError(f"the destination {move_to} must be outside the scanned folder {r}")
+            if _inside(r, move_to) or (_inside(move_to, r) and not _hidden_below(move_to, r)):
+                raise PlanError(f"the destination {move_to} must be outside the scanned folder {r}, "
+                                "or a hidden folder inside it (scans never look inside hidden folders)")
         journal_path = journal_path or os.path.join(move_to, f'musicdedup-journal-{stamp}.jsonl')
     else:
         journal_path = journal_path or os.path.abspath(f'musicdedup-deleted-{stamp}.jsonl')

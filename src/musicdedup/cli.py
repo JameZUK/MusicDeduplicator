@@ -113,7 +113,8 @@ def cmd_apply(args) -> int:
             print("Cancelled; nothing was changed.")
             return 1
     result = apply_plan(plan, mode=mode, move_to=args.move_to, dry_run=args.dry_run,
-                        journal_path=args.journal, state_dir=default_state_dir(), user=getpass.getuser())
+                        journal_path=args.journal, state_dir=default_state_dir(), user=getpass.getuser(),
+                        act_on=_act_on(args.act_on))
     done = ', '.join(f"{v} {k}" for k, v in sorted(result.counts.items())) or 'nothing done'
     prefix = '[dry run] ' if args.dry_run else ''
     print(f"\n{prefix}{done}; {human_bytes(result.bytes_freed)} {'would be ' if args.dry_run else ''}freed.")
@@ -126,6 +127,18 @@ def cmd_apply(args) -> int:
         if mode == 'move':
             print(f"To put everything back: musicdedup undo '{result.journal}'")
     return 0 if not result.counts.get('failed') else 1
+
+
+def _act_on(pairs: list[str]) -> dict[str, str]:
+    out = {}
+    for p in pairs or []:
+        scanned, sep, live = p.partition('=')
+        if not sep or not scanned or not live:
+            raise PlanError(f"--act-on needs SCANNED=LIVE, got {p!r}")
+        if not os.path.isdir(live):
+            raise PlanError(f"--act-on folder does not exist: {live}")
+        out[scanned] = live
+    return out
 
 
 def cmd_undo(args) -> int:
@@ -158,7 +171,7 @@ def cmd_serve(args) -> int:
         return 2
     app = App(args.plan, policy, state_dir=default_state_dir(), cache_path=args.cache or default_cache_path(),
               move_to=args.move_to, allow_delete=args.allow_delete, library=args.library,
-              excludes=args.exclude, workers=args.workers,
+              excludes=args.exclude, workers=args.workers, act_on=_act_on(args.act_on),
               scan_options=Options(prefer=args.prefer, within_folders=args.within_folders,
                                    remove_smaller_editions=args.remove_smaller_editions))
     server = make_server(app, args.host, args.port)
@@ -228,6 +241,9 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument('-n', '--dry-run', action='store_true', help="show what would happen; change nothing")
     a.add_argument('-y', '--yes', action='store_true', help="don't ask for confirmation")
     a.add_argument('--journal', help="where to write the journal of actions")
+    a.add_argument('--act-on', action='append', default=[], metavar='SCANNED=LIVE',
+                   help="act on LIVE instead of the scanned folder SCANNED, e.g. when the scan read a "
+                        "read-only mount of the same files (every file is re-checked there first)")
     a.set_defaults(func=cmd_apply)
 
     u = sub.add_parser('undo', parents=[common], help="put moved files back, using a journal")
@@ -258,6 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument('--remove-smaller-editions', action='store_true', help="as for scan")
     w.add_argument('--workers', type=int, help="parallel fingerprinting jobs for rescans")
     w.add_argument('--scan-on-start', action='store_true', help="start a rescan as soon as the server starts")
+    w.add_argument('--act-on', action='append', default=[], metavar='SCANNED=LIVE', help="as for apply")
     w.set_defaults(func=cmd_serve)
 
     c = sub.add_parser('cache', parents=[common], help="show or clear the fingerprint cache")

@@ -186,3 +186,44 @@ def test_move_file_across_filesystems(tmp_path, monkeypatch):
     monkeypatch.setattr(executor.os, 'stat', fake_stat)
     executor.move_file(str(src), str(dst))
     assert dst.read_bytes() == b'audio' * 1000 and not src.exists()
+
+
+def test_act_on_a_live_copy_of_a_scanned_folder(dup_lib, tmp_path):
+    """Scan one copy, act on another: the scanned copy is never touched."""
+    import shutil
+
+    from musicdedup.executor import map_plan
+    _, _, plan = dup_lib.scan()
+    live = tmp_path / 'live'
+    shutil.copytree(dup_lib.root, live, copy_function=shutil.copy2)   # same sizes and mtimes
+    scanned_before = snapshot(dup_lib.root)
+    q = live / '.quarantine'
+    result = apply_plan(plan, mode='move', move_to=str(q), act_on={dup_lib.root: str(live)})
+    assert result.counts['moved'] == 4 and not result.skipped
+    assert snapshot(dup_lib.root) == scanned_before
+    assert not (live / 'B' / 'Album').exists() and (live / 'A' / 'Album' / '01.flac').exists()
+    assert (q / 'live' / 'B' / 'Album' / '01.flac').exists()
+    assert undo(result.journal).counts['restored'] == 4
+    assert (live / 'B' / 'Album' / 'cover.jpg').exists()
+    mapped = map_plan(plan, {dup_lib.root: str(live)})
+    assert all(r['path'].startswith(str(live)) for r in mapped['removals'])
+    assert plan['removals'][0]['path'].startswith(dup_lib.root)       # the original plan is unchanged
+
+
+def test_act_on_skips_files_that_differ_in_the_live_copy(dup_lib, tmp_path):
+    import shutil
+    _, _, plan = dup_lib.scan()
+    live = tmp_path / 'live'
+    shutil.copytree(dup_lib.root, live, copy_function=shutil.copyfile)   # plain copy: new mtimes
+    result = apply_plan(plan, mode='delete', journal_path=str(tmp_path / 'j.jsonl'),
+                        act_on={dup_lib.root: str(live)})
+    assert result.counts.get('deleted', 0) == 0 and result.skipped
+    assert (live / 'B' / 'Album' / '01.flac').exists()
+
+
+def test_hidden_quarantine_inside_the_library_is_allowed(dup_lib):
+    _, _, plan = dup_lib.scan()
+    result = apply_plan(plan, mode='move', move_to=dup_lib.path('A/.musicdedup-quarantine'))
+    assert result.counts['moved'] == 4
+    with pytest.raises(PlanError):
+        apply_plan(plan, mode='move', move_to=dup_lib.path('A/Quarantine'))
