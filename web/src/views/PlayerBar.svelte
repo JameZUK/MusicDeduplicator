@@ -1,13 +1,10 @@
 <script>
-  import { onMount } from 'svelte';
-  import { player, register, toggle, switchTo, setAutoFlip, unload } from '../lib/player.svelte.js';
+  import { player, toggle, switchTo, setAutoFlip, unload } from '../lib/player.svelte.js';
   import { time } from '../lib/format.js';
   import { route } from '../lib/router.svelte.js';
   import WaveSeek from './WaveSeek.svelte';
 
   let { oncompare } = $props();
-  let audioA, audioB;
-  onMount(() => register(audioA, audioB));
 
   // The full comparison has its own controls, so the bar stays out of the way there.
   const hidden = $derived(!player.loaded || route.query.a);
@@ -22,8 +19,6 @@
 
 <svelte:window onkeydown={onkey} />
 
-<audio bind:this={audioA} preload="auto"></audio>
-<audio bind:this={audioB} preload="auto"></audio>
 
 {#if !hidden}
   <div class="bar" role="region" aria-label="Player">
@@ -45,8 +40,14 @@
     </div>
 
     <div class="seek">
+      {#if player.status === 'loading'}
+        <div class="prep" role="progressbar" aria-valuenow={Math.round(player.progress * 100)} aria-valuemin="0" aria-valuemax="100">
+          <span style:width={`${player.progress * 100}%`}></span><em>preparing both copies for A/B… {Math.round(player.progress * 100)}%</em>
+        </div>
+      {:else}
       <WaveSeek path={player.active === 'a' ? player.a : player.b} height={30}
         offset={player.active === 'a' ? 0 : player.offset} />
+      {/if}
       <span class="mono clock">{time(player.position)} / {time(player.duration)}</span>
     </div>
 
@@ -82,6 +83,9 @@
   .ab button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .seek { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; min-width: 0; }
   .clock { font-size: 12px; color: var(--ink-2); }
+  .prep { position: relative; height: 30px; border-radius: 6px; background: var(--panel-2); overflow: hidden; }
+  .prep span { position: absolute; inset: 0 auto 0 0; background: var(--accent-soft); transition: width .2s; }
+  .prep em { position: relative; display: block; font-style: normal; font-size: 12px; line-height: 30px; padding-left: 10px; color: var(--ink-2); }
   .flip { display: flex; flex-direction: column; gap: 2px; }
   select { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; font: inherit; font-size: 12.5px; padding: 2px 4px; }
   .close { padding: 6px 10px; }

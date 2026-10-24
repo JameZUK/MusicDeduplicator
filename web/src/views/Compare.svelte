@@ -200,6 +200,9 @@
       <button role="radio" aria-checked={player.active === 'b'} class:on={player.active === 'b'} onclick={() => switchTo('b')}>B</button>
     </div>
     <span class="clock mono">{time(player.position)}</span>
+    {#if player.status === 'loading'}
+      <span class="prep mono">preparing A/B… {Math.round(player.progress * 100)}%</span>
+    {/if}
     <label class="opt">
       <span class="eyebrow">auto A/B</span>
       <select value={player.autoFlip} onchange={(e) => setAutoFlip(Number(e.currentTarget.value))}>
@@ -266,6 +269,7 @@
   .ab button { border: 0; background: none; padding: 6px 18px; font-family: var(--font-display); font-size: 19px; color: var(--ink-3); }
   .ab button.on { background: var(--accent); color: var(--accent-ink); }
   .clock { font-size: 22px; min-width: 64px; }
+  .prep { font-size: 12px; color: var(--accent); }
   .opt { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
   .opt.check { flex-direction: row; align-items: center; gap: 6px; }
   .opt input { accent-color: var(--accent); }
