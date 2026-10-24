@@ -29,7 +29,9 @@ export function artistAlbum(relPath) {
   if (parts.length === 1) return { artist: '', album: parts[0] };
   const disc = /^\s*(cd|disc|disk)\s*\d+\s*$/i.test(parts.at(-1));
   const album = disc ? `${parts.at(-2)} · ${parts.at(-1)}` : parts.at(-1);
-  const artist = parts.slice(0, disc ? -2 : -1).join(' / ');
+  // The folder holding the album is the artist; anything above it (e.g. "Organised") is
+  // just where the library keeps it.
+  const artist = parts.at(disc ? -3 : -2) || '';
   return { artist, album };
 }
 

@@ -54,7 +54,8 @@
 {/if}
 
 <style>
-  .scan { display: flex; flex-direction: column; gap: 5px; min-width: 300px; }
+  .scan { display: flex; flex-direction: column; gap: 5px; min-width: min(300px, 100%); }
+  @media (max-width: 760px) { .scan { flex: 1 1 100%; order: -1; } }
   .scan.big { min-width: 0; width: min(560px, 100%); }
   .line { display: flex; align-items: center; gap: 10px; font-size: 13px; flex-wrap: wrap; }
   .line .mono { font-size: 12px; }

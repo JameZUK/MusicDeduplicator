@@ -40,14 +40,22 @@
     </div>
   </div>
 
-  <div class="meter panel" aria-label="Space selected for removal">
-    <span class="eyebrow">reclaimable</span>
+  <div class="meter panel" aria-label={`Reclaimable: ${bytes(planned)}, of which ${bytes(decided)} selected`}>
+    <div class="meter-head">
+      <span class="eyebrow">reclaimable</span>
+      <span class="meter-total mono">{bytes(planned)}</span>
+    </div>
+    <!-- Every segment is a share of the reclaimable space: soft amber until you accept
+         the groups it stands for, then green. -->
     <div class="vu">
       {#each Array(24) as _, i}
-        <span class:lit={planned && i < Math.round((decided / planned) * 24)} class:hot={i >= 20}></span>
+        <span class:planned={planned > 0} class:lit={planned && i < Math.round((decided / planned) * 24)}></span>
       {/each}
     </div>
-    <div class="vu-legend mono"><span>{bytes(decided)}</span><span>{bytes(planned)}</span></div>
+    <div class="vu-legend mono">
+      <span><i class="sw lit"></i>{bytes(decided)} selected</span>
+      <span>{s.audio_bytes ? `${((planned / s.audio_bytes) * 100).toFixed(1)}% of your library` : ''}</span>
+    </div>
   </div>
 </section>
 
@@ -182,9 +190,13 @@
   .meter { padding: 18px 20px; }
   .vu { display: grid; grid-template-columns: repeat(24, 1fr); gap: 3px; margin: 12px 0 8px; height: 46px; }
   .vu span { background: var(--line-soft); border-radius: 2px; transition: background .4s; }
-  .vu span.lit { background: var(--keep); }
-  .vu span.lit.hot { background: var(--accent); }
-  .vu-legend { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-3); }
+  .vu span.planned { background: var(--accent-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent); }
+  .vu span.lit { background: var(--keep); box-shadow: none; }
+  .vu-legend { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--ink-3); flex-wrap: wrap; }
+  .meter-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .meter-total { font-size: 20px; color: var(--accent); }
+  .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .sw.lit { background: var(--keep); }
 
   .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
   .card { padding: 18px 20px; min-width: 0; }
@@ -210,7 +222,8 @@
   .list li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line-soft); min-width: 0; }
   .list li:last-child { border-bottom: 0; }
   .clip { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tag { flex: none; font-size: 11.5px; color: var(--ink-3); }
+  .tag { flex: 0 1 auto; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 11.5px; color: var(--ink-3); }
   .link { all: unset; flex: 1; min-width: 0; display: flex; cursor: pointer; color: var(--ink); text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
   .link:hover { text-decoration-color: var(--accent); }
   .link.inline { display: inline; flex: none; margin-left: 6px; }

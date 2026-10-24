@@ -184,7 +184,8 @@
   .nothing p { color: var(--ink-3); }
 
   @media (max-width: 900px) {
-    .review { grid-template-columns: 1fr; }
+    /* minmax(0, ...): a long album name must truncate, not stretch the column past the screen. */
+    .review { grid-template-columns: minmax(0, 1fr); }
     .queue { position: static; max-height: 230px; }
   }
 </style>

@@ -139,6 +139,11 @@
     .actions .btn { padding: 9px 14px; }
     .actions .primary { flex: 1; justify-content: center; }
     .step { display: inline-flex; font-size: 18px; padding: 6px 14px !important; }
+    @media (max-width: 400px) {
+      .actions { margin: 0 -12px; padding: 8px 12px; gap: 6px; }
+      .actions .btn { padding: 9px 10px; }
+      .step { padding: 6px 10px !important; }
+    }
     .verdict { display: none; }
   }
   .verdict { font-family: var(--font-mono); font-size: 12px; padding: 4px 8px; border-radius: 4px; }

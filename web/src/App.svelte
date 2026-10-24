@@ -212,9 +212,19 @@
 
   @media (max-width: 760px) {
     .top { flex-wrap: wrap; gap: 12px; padding: 10px 16px; position: static; }
-    .right { margin-left: 0; width: 100%; justify-content: space-between; }
+    .right { margin-left: 0; width: 100%; justify-content: space-between; flex-wrap: wrap; row-gap: 10px; }
     main { padding: 18px 16px 32px; }
     .error { margin: 12px 16px 0; }
     footer { padding: 12px 16px; }
+  }
+  /* Very narrow phones: tighter spacing; the links may scroll sideways rather than push the page wider. */
+  @media (max-width: 400px) {
+    .top { padding: 10px 12px; gap: 10px; }
+    nav { overflow-x: auto; max-width: 100%; scrollbar-width: none; }
+    nav a { padding: 6px 9px; font-size: 13.5px; white-space: nowrap; }
+    .brand span { font-size: 19px; }
+    main { padding: 16px 12px 110px; }
+    .error { margin: 12px 12px 0; }
+    footer { padding: 12px; }
   }
 </style>
