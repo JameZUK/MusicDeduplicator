@@ -89,6 +89,57 @@ confirm. Before acting on each file, `apply` checks that the file and the copy b
 kept both still exist and haven't changed since the scan. Anything that fails a
 check is skipped and listed.
 
+## Review in the browser
+
+`musicdedup serve` opens a dashboard for a plan, so you can review it visually instead
+of reading the report:
+
+```bash
+musicdedup serve musicdedup-plan.json --move-to ~/Duplicates
+# then open http://127.0.0.1:8650/
+```
+
+- **Overview:** collection size, the split between hi-res, CD-quality and lossy tracks,
+  space you could free, editions kept intact, edited versions and unreadable files.
+- **Review, one by one:** each duplicate group shown as album cards with their artwork
+  and quality. A "patch bay" links every track to its copy in the folder being kept.
+  Accept the group (<kbd>A</kbd>), keep everything (<kbd>S</kbd>) or choose a different
+  copy to keep. <kbd>J</kbd>/<kbd>K</kbd> move between groups.
+- **Review, as a list:** every group in a table with checkboxes, to accept or skip many
+  at once. Filters include "identical albums only" and "only removes lossy copies".
+- **Compare and listen:** two copies on one timeline, with both waveforms and the
+  difference between them, so an edit (explicit or clean, radio edit) shows up as a red
+  stretch. Both copies play in sync, and <kbd>A</kbd>/<kbd>B</kbd> switches between them
+  instantly without losing your place. There's also auto-switching and a loop around
+  the difference.
+- **Apply and undo:** preview exactly what will change, do a dry run, then move (or, with
+  `--allow-delete`, delete). History lists every apply, from the dashboard or the CLI,
+  with one-click undo for moves.
+
+Your decisions are saved as you go, on the machine running the dashboard, so you can
+stop and carry on later or from another device. Nothing changes until you press Apply,
+and applying uses the same checks as `musicdedup apply`.
+
+Waveforms need `ffmpeg` on the machine running the dashboard. Comparisons load both
+copies into the browser's memory first (a few seconds for hi-res files), which is what
+makes switching instant.
+
+### Who can use it
+
+By default the dashboard only listens on `127.0.0.1`. Two ways to open it up:
+
+| | Command | Who gets in |
+|---|---|---|
+| Your LAN, no login | `--host 0.0.0.0` | Only private (LAN) addresses. Narrow it with `--allow 192.168.0.0/24` |
+| Behind a login proxy | `--host 0.0.0.0 --auth authelia --trusted-proxy 10.0.0.5` | Only requests from the proxy carrying its `Remote-User` header; the name is recorded in the history |
+
+Either way, actions are protected against requests from other websites, and audio,
+artwork and comparisons are only served for files in the plan. If you reach the
+dashboard by a host name, add it with `--hostname dedup.example.lan` (other names are
+refused, which blocks DNS-rebinding attacks). Behind a proxy, pass the original `Host`
+header through. For nginx with Authelia, add `proxy_set_header Host $host;` alongside
+the usual `auth_request` settings.
+
 ## What counts as a duplicate
 
 | Situation | What happens |
@@ -131,6 +182,8 @@ musicdedup scan LIBRARY [LIBRARY ...]
 
 musicdedup apply PLAN (--move-to DIR | --delete) [--dry-run] [--yes] [--journal FILE]
 musicdedup undo JOURNAL [--dry-run]
+musicdedup serve PLAN [--host ADDR] [--port 8650] [--move-to DIR] [--allow-delete]
+                 [--auth none|authelia] [--allow CIDR] [--trusted-proxy CIDR] [--hostname NAME]
 musicdedup cache info|clear
 
 All commands: -v/--verbose, -q/--quiet, --log-file FILE
@@ -179,6 +232,13 @@ works as a wrapper around the new commands, but `musicdedup` is recommended.
 pip install -e '.[dev]'
 ruff check .
 pytest                 # integration tests run when ffmpeg and fpcalc are installed
+```
+
+The dashboard's source is in `web/` (Svelte + Vite). Its build output is committed under
+`src/musicdedup/web/static/`, so installing never needs Node. After changing the UI:
+
+```bash
+cd web && npm install && npm run build      # npm run dev proxies to a running `musicdedup serve`
 ```
 
 ## License
