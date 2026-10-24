@@ -16,34 +16,34 @@ from musicdedup.web.server import App, make_server
 
 def test_lan_only_by_default():
     p = AccessPolicy()
-    assert p.check('192.168.1.20', {'Host': '192.168.1.5:8650'}) is None
+    assert p.check('192.168.50.20', {'Host': '192.168.50.5:8650'}) is None
     assert p.check('::ffff:10.0.0.7', {'Host': 'localhost:8650'}) is None
     with pytest.raises(Denied):
-        p.check('8.8.8.8', {'Host': '192.168.1.5:8650'})
+        p.check('8.8.8.8', {'Host': '192.168.50.5:8650'})
 
 
 def test_custom_allowlist():
-    p = AccessPolicy(allow=['172.16.32.0/23'])
-    p.check('172.16.33.4', {'Host': '172.16.32.102'})
+    p = AccessPolicy(allow=['10.20.30.0/24'])
+    p.check('10.20.30.4', {'Host': '10.20.30.9'})
     with pytest.raises(Denied):
-        p.check('192.168.1.20', {'Host': '172.16.32.102'})
+        p.check('192.168.50.20', {'Host': '10.20.30.9'})
 
 
 def test_dns_rebinding_host_is_refused():
     p = AccessPolicy(hostnames=['musicdedup.lan'])
-    p.check('192.168.1.20', {'Host': 'musicdedup.lan:8650'})
+    p.check('192.168.50.20', {'Host': 'musicdedup.lan:8650'})
     with pytest.raises(Denied):
-        p.check('192.168.1.20', {'Host': 'attacker.example'})
+        p.check('192.168.50.20', {'Host': 'attacker.example'})
 
 
 def test_authelia_requires_proxy_and_user():
-    p = AccessPolicy(mode='authelia', trusted_proxies=['172.16.32.10/32'])
-    assert p.check('172.16.32.10', {'Remote-User': 'james'}) == 'james'
+    p = AccessPolicy(mode='authelia', trusted_proxies=['10.20.30.10/32'])
+    assert p.check('10.20.30.10', {'Remote-User': 'listener'}) == 'listener'
     with pytest.raises(Denied) as e:
-        p.check('172.16.32.10', {})
+        p.check('10.20.30.10', {})
     assert e.value.status == 401
     with pytest.raises(Denied):
-        p.check('172.16.32.11', {'Remote-User': 'james'})   # header from anyone else is ignored
+        p.check('10.20.30.11', {'Remote-User': 'listener'})   # header from anyone else is ignored
     with pytest.raises(ValueError):
         AccessPolicy(mode='authelia')
 
@@ -171,3 +171,15 @@ def test_delete_needs_server_flag_and_confirmation(server):
 def test_nothing_applies_without_decisions(server):
     base, token, *_ = server
     assert call(base, '/api/apply', {'decisions': {}, 'mode': 'move'}, token)[0] == 400
+
+
+def test_waveform_only_for_plan_tracks(server):
+    base, *_ = server
+    assert call(base, '/api/waveform?path=/etc/passwd')[0] == 404
+
+
+def test_overview_has_bulk_review_fields(server):
+    base, *_ = server
+    g = call(base, '/api/plan')[1]['groups'][0]
+    assert g['identical'] is True and g['only_lossy_removed'] is False
+    assert all('quality' in r for r in g['remove'])

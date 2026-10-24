@@ -16,3 +16,7 @@ musicdedup-deleted-*.jsonl
 config.json
 file_cache.db
 music_deduplicate.log
+
+# Local browser-test output (may contain library paths)
+.playwright-mcp/
+web/node_modules/

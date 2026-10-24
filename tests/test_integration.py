@@ -128,3 +128,13 @@ def test_legacy_wrapper_lists(library, tmp_path):
                        cwd=tmp_path, capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
     assert 'Album (2026)' in r.stdout and (tmp_path / 'musicdedup-plan.json').exists()
+
+
+def test_waveform_peaks(library):
+    from musicdedup.waveform import waveform
+    path = f'{library}/Artist/Album/01.flac'
+    st = os.stat(path)
+    w = waveform(path, st.st_size, st.st_mtime_ns)
+    assert 39 < w['duration'] < 41
+    assert len(w['peak']) == pytest.approx(w['duration'] * w['per_second'], abs=1)
+    assert max(w['peak']) > 100 and all(0 <= v <= 255 for v in w['peak'])

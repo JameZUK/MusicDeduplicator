@@ -27,6 +27,7 @@ from ..decisions import DecisionError, apply_decisions
 from ..executor import PlanError, apply_plan, load_plan, undo
 from ..fingerprint import FingerprintError, compare_profile, run_fpcalc
 from ..state import read_history
+from ..waveform import WaveformError, waveform
 from .access import AccessPolicy, Denied
 
 log = logging.getLogger(__name__)
@@ -76,8 +77,12 @@ class App:
         groups = []
         for g in p['groups']:
             keep = p['folders'].get(g['keep'], {})
-            groups.append({**g, 'keep_release': keep.get('release'),
+            removes = [{**r, 'quality': _folder_quality(p['folders'].get(r['folder'], {})),
+                        'lossy': _all_lossy(p['folders'].get(r['folder'], {}))} for r in g['remove']]
+            groups.append({**g, 'remove': removes, 'keep_release': keep.get('release'),
                            'keep_quality': _folder_quality(keep),
+                           'identical': all(r['kind'] == 'duplicate' for r in g['remove']),
+                           'only_lossy_removed': all(r['lossy'] for r in removes),
                            'bytes': sum(r['bytes'] for r in g['remove'])})
         return {k: p[k] for k in ('created', 'roots', 'options', 'summary', 'smaller_editions_kept',
                                   'repeated_in_release', 'blocked', 'edited_versions', 'shared_tracks',
@@ -162,6 +167,11 @@ class App:
 
         threading.Thread(target=run, daemon=True).start()
         return jid
+
+
+def _all_lossy(folder: dict) -> bool:
+    tracks = folder.get('tracks', [])
+    return bool(tracks) and not any(t.get('lossless') for t in tracks)
 
 
 def _folder_quality(folder: dict) -> str:
@@ -249,6 +259,7 @@ class Handler(BaseHTTPRequestHandler):
         (r'/api/compare', 'get_compare'),
         (r'/api/cover', 'get_cover'),
         (r'/api/audio', 'get_audio'),
+        (r'/api/waveform', 'get_waveform'),
         (r'/api/decisions', 'get_decisions'),
         (r'/api/history', 'get_history'),
         (r'/api/jobs/([0-9a-f]+)', 'get_job'),
@@ -292,6 +303,16 @@ class Handler(BaseHTTPRequestHandler):
         if job is None:
             raise Denied(404, "no such job")
         self._json(job)
+
+    def get_waveform(self, q):
+        t = self.app.tracks.get(q.get('path', ''))
+        if t is None:
+            raise Denied(404, "track is not part of this plan")
+        try:
+            data = waveform(t['path'], t['size'], t['mtime_ns'])
+        except WaveformError as e:
+            raise Denied(422, f"no waveform: {e}") from e
+        self._send(200, json.dumps(data).encode(), 'application/json', {'Cache-Control': 'private, max-age=3600'})
 
     def get_cover(self, q):
         folder = q.get('folder', '')
