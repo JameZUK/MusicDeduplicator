@@ -183,3 +183,59 @@ def test_overview_has_bulk_review_fields(server):
     g = call(base, '/api/plan')[1]['groups'][0]
     assert g['identical'] is True and g['only_lossy_removed'] is False
     assert all('quality' in r for r in g['remove'])
+
+
+# -- rescans run in a child process --------------------------------------------------------
+# Targets for the child must be importable by name (it is a fresh 'spawn' process).
+
+def _killed_scan(events, cancel, kwargs, level):
+    os.kill(os.getpid(), 9)          # what the OOM killer does
+
+
+def _stoppable_scan(events, cancel, kwargs, level):
+    events.put(('progress', 'fingerprinting', 1, 10))
+    cancel.wait(30)
+    events.put(('cancelled',))
+
+
+def _scan_app(tmp_path):
+    lib = tmp_path / 'music-lib'
+    lib.mkdir(exist_ok=True)
+    return App(str(tmp_path / 'plan' / 'plan.json'), AccessPolicy(), state_dir=str(tmp_path / 'state'),
+               cache_path=str(tmp_path / 'c.db'), move_to=None, allow_delete=False, library=[str(lib)])
+
+
+def _wait_scan(app, until=lambda st: st['state'] != 'running'):
+    for _ in range(600):
+        if until(app.scan_state):
+            return app.scan_state
+        time.sleep(0.05)
+    raise AssertionError(f'scan state stuck at {app.scan_state}')
+
+
+def test_a_killed_scan_process_fails_cleanly(tmp_path):
+    app = _scan_app(tmp_path)
+    app._scan_target = _killed_scan
+    app.start_scan('listener')
+    st = _wait_scan(app)
+    assert st['state'] == 'failed' and 'killed' in st['error']
+    app._scan_target = _stoppable_scan    # the server carries on and can scan again
+    app.start_scan('listener')
+    _wait_scan(app, lambda st: st.get('stage') == 'fingerprinting')
+    app.cancel_scan()
+    assert _wait_scan(app)['state'] == 'cancelled'
+
+
+def test_scan_errors_and_logs_come_back_from_the_child(tmp_path, caplog):
+    (tmp_path / 'plan').mkdir()
+    app = _scan_app(tmp_path)
+    os.chmod(tmp_path / 'plan', 0o500)                 # the plan can't be written there
+    try:
+        with caplog.at_level('INFO'):
+            app.start_scan('listener')
+            st = _wait_scan(app)
+    finally:
+        os.chmod(tmp_path / 'plan', 0o700)
+    assert st['state'] == 'failed' and 'plan.json' in st['error']
+    assert any(r.name == 'musicdedup.web.server' and 'scan failed' in r.getMessage() for r in caplog.records)
+    assert any(r.name == 'musicdedup.scanner' for r in caplog.records)    # forwarded from the child

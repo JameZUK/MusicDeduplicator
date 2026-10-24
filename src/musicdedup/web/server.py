@@ -10,8 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import logging.handlers
 import mimetypes
+import multiprocessing
 import os
+import queue
 import re
 import threading
 import time
@@ -34,6 +37,8 @@ from ..waveform import WaveformError, waveform
 from .access import AccessPolicy, Denied
 
 log = logging.getLogger(__name__)
+
+PROGRESS_SECONDS = 0.5      # how often a scan reports progress to the server
 
 SECURITY_HEADERS = {
     'Content-Security-Policy': "default-src 'self'; img-src 'self' data: blob:; media-src 'self'; "
@@ -65,7 +70,11 @@ class App:
         self.act_on = act_on or {}
         self.jobs: dict[str, dict] = {}
         self.scan_state: dict = {'state': 'idle'}
-        self._cancel = threading.Event()
+        # Scans run in a child process, so the gigabytes a big library needs go back
+        # to the system when the scan ends instead of staying with the server.
+        self._mp = multiprocessing.get_context('spawn')
+        self._cancel = self._mp.Event()
+        self._scan_target = _scan_process
         self._lock = threading.Lock()
         self._plan_mtime = None
         self.plan: dict | None = None
@@ -224,18 +233,45 @@ class App:
                 st['stage_started'] = time.time()   # for per-stage speed and time left
             st.update(stage=stage, done=done, total=total)
 
+        events = self._mp.Queue()
+        kwargs = dict(roots=self.library, plan_path=self.plan_path, cache_path=self.cache_path,
+                      options=self.scan_options, excludes=self.excludes, workers=self.workers,
+                      state_dir=self.state_dir)
+        child = self._mp.Process(target=self._scan_target, name='musicdedup-scan', daemon=True,
+                                 args=(events, self._cancel, kwargs, logging.getLogger().getEffectiveLevel()))
+
         def run():
             try:
-                plan = run_scan(self.library, plan_path=self.plan_path, cache_path=self.cache_path,
-                                options=self.scan_options, excludes=self.excludes, workers=self.workers,
-                                on_progress=progress, cancel=self._cancel, state_dir=self.state_dir)
-                st.update(state='done', summary={
-                    'tracks': plan['summary']['audio_files'],
-                    'new': plan['new_music']['new_tracks'], 'changed': plan['new_music']['changed_tracks'],
-                    'duplicate_folders': plan['summary']['duplicate_folders']})
-                self.reload()
-            except ScanCancelled:
-                st.update(state='cancelled')
+                child.start()
+                outcome = None
+                while outcome is None:
+                    try:
+                        item = events.get(timeout=1.0)
+                    except queue.Empty:
+                        if not child.is_alive():
+                            # Ended without a word: killed (out of memory, say) or crashed.
+                            try:
+                                item = events.get(timeout=1.0)
+                            except queue.Empty:
+                                code = child.exitcode
+                                why = 'it was killed' if code is not None and code < 0 else f'exit code {code}'
+                                outcome = ('failed', f'the scan process ended unexpectedly ({why})')
+                                log.error("scan failed: %s", outcome[1])
+                                break
+                        else:
+                            continue
+                    if isinstance(item, logging.LogRecord):
+                        logging.getLogger(item.name).handle(item)
+                    elif item[0] == 'progress':
+                        progress(*item[1:])
+                    else:
+                        outcome = item
+                child.join(timeout=30)
+                if outcome[0] == 'done':
+                    st.update(state='done', summary=outcome[1])
+                    self.reload()
+                else:
+                    st.update(state=outcome[0], **({'error': outcome[1]} if len(outcome) > 1 else {}))
             except Exception as e:  # report, never crash the server
                 log.exception("scan failed")
                 st.update(state='failed', error=str(e))
@@ -270,6 +306,33 @@ class App:
 
         threading.Thread(target=run, daemon=True).start()
         return jid
+
+
+def _scan_process(events, cancel, kwargs: dict, level: int) -> None:
+    """A dashboard rescan, in its own process. Log records, progress and the outcome
+    go back to the server through `events`; setting `cancel` stops it."""
+    root = logging.getLogger()
+    root.handlers[:] = [logging.handlers.QueueHandler(events)]
+    root.setLevel(level)
+    last = {'stage': None, 'at': 0.0}
+
+    def progress(stage: str, done: int, total: int) -> None:
+        now = time.monotonic()
+        if stage != last['stage'] or done == total or now - last['at'] >= PROGRESS_SECONDS:
+            last.update(stage=stage, at=now)
+            events.put(('progress', stage, done, total))
+
+    try:
+        plan = run_scan(on_progress=progress, cancel=cancel, **kwargs)
+        events.put(('done', {
+            'tracks': plan['summary']['audio_files'],
+            'new': plan['new_music']['new_tracks'], 'changed': plan['new_music']['changed_tracks'],
+            'duplicate_folders': plan['summary']['duplicate_folders']}))
+    except ScanCancelled:
+        events.put(('cancelled',))
+    except Exception as e:
+        logging.getLogger(__name__).exception("scan failed")
+        events.put(('failed', str(e)))
 
 
 def _all_lossy(folder: dict) -> bool:

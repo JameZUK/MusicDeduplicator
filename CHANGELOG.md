@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.2 — 2026-10-24
+
+### Fixed
+- After a rescan from the dashboard, the server kept the memory the scan had used
+  (about 2 GB for a 130,000-track library). On a small machine that could run it out of
+  memory the next time the dashboard was used. Rescans now run in their own process, so
+  their memory goes back to the system when they finish. If that process dies (killed
+  for running out of memory, say), the scan is reported as failed and the dashboard
+  carries on.
+
 ## 2.1.1 — 2026-10-24
 
 ### Fixed

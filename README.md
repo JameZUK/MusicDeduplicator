@@ -175,7 +175,8 @@ musicdedup serve musicdedup-plan.json --move-to ~/Duplicates
 - **Library:** collection statistics (tracks, size, playing time, artists, formats, bit depths,
   sample rates, biggest artists and albums), what's **new since the last scan**, and a scan history.
 - **Rescan:** start `serve` with `--library FOLDER` and the dashboard can rescan for you, with live
-  progress and a Stop button. Stopping loses nothing: fingerprints are cached as they're made. Decisions
+  progress and a Stop button. The scan runs in its own process, so the memory it needs is released when it ends.
+  Stopping loses nothing: fingerprints are cached as they're made. Decisions
   carry over to the new plan for groups that haven't changed. `--scan-on-start` begins a scan when
   the server starts; without a plan yet, the dashboard shows the scan and loads the plan when it's done.
 - **Apply and undo:** preview exactly what will change, do a dry run, then move (or, with

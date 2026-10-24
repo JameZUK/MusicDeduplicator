@@ -1,3 +1,3 @@
 """Find and safely remove duplicate albums and tracks in a music library."""
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"
