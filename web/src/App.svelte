@@ -211,7 +211,7 @@
   .path { overflow: hidden; text-overflow: ellipsis; }
 
   @media (max-width: 760px) {
-    .top { flex-wrap: wrap; gap: 12px; padding: 10px 16px; }
+    .top { flex-wrap: wrap; gap: 12px; padding: 10px 16px; position: static; }
     .right { margin-left: 0; width: 100%; justify-content: space-between; }
     main { padding: 18px 16px 32px; }
     .error { margin: 12px 16px 0; }

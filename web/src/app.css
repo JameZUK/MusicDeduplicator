@@ -160,3 +160,9 @@ kbd {
 }
 
 ::selection { background: var(--accent); color: var(--accent-ink); }
+
+/* Touch screens: keyboard hints mean nothing, and controls need room for a finger. */
+@media (hover: none) and (pointer: coarse) {
+  kbd { display: none; }
+  .btn { min-height: 36px; }
+}

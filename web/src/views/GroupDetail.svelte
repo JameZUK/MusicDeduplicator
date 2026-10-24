@@ -7,7 +7,7 @@
   import Quality from './Quality.svelte';
   import PatchBay from './PatchBay.svelte';
 
-  let { group, onchoose } = $props();
+  let { group, onchoose, onstep = null } = $props();
 
   let detail = $state(null);
   let error = $state('');
@@ -45,14 +45,8 @@
   }
 </script>
 
-<article class="group rise">
-  <header class="head">
-    <div>
-      <span class="eyebrow">group {group.id} · {members.length} copies · {bytes(group.bytes)} reclaimable</span>
-      <h1>{artistAlbum(rel(group.keep, plan.roots)).album}</h1>
-      <p class="sub">{artistAlbum(rel(group.keep, plan.roots)).artist || 'Unknown artist'}</p>
-    </div>
-    <div class="actions">
+{#snippet decisionButtons()}
+      {#if onstep}<button class="btn step" onclick={() => onstep(-1)} aria-label="Previous group">‹</button>{/if}
       {#if kind !== 'undecided'}
         <span class={`verdict ${kind}`}>
           {kind === 'accept' ? 'Accepted' : kind === 'skip' ? 'Skipped' : 'New keeper chosen'}
@@ -61,8 +55,21 @@
       {/if}
       <button class="btn" onclick={() => onchoose('skip')}>Keep all <kbd>S</kbd></button>
       <button class="btn primary" onclick={() => onchoose('accept')}>Accept <kbd>A</kbd></button>
+      {#if onstep}<button class="btn step" onclick={() => onstep(1)} aria-label="Next group">›</button>{/if}
+{/snippet}
+
+<article class="group rise">
+  <header class="head">
+    <div>
+      <span class="eyebrow">group {group.id} · {members.length} copies · {bytes(group.bytes)} reclaimable</span>
+      <h1>{artistAlbum(rel(group.keep, plan.roots)).album}</h1>
+      <p class="sub">{artistAlbum(rel(group.keep, plan.roots)).artist || 'Unknown artist'}</p>
     </div>
+    <div class="actions desk-actions">{@render decisionButtons()}</div>
   </header>
+
+  <!-- Phones: the same buttons, as a bar that sticks while you scroll the group. -->
+  <div class="actions phone-actions">{@render decisionButtons()}</div>
 
   {#if error}<p class="err">{error}</p>{/if}
 
@@ -116,6 +123,24 @@
   h1 { font-size: clamp(26px, 3.2vw, 40px); line-height: 1.05; margin: 6px 0 2px; font-weight: 520; }
   .sub { margin: 0; color: var(--ink-2); font-size: 16px; }
   .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .step { display: none; }
+  .phone-actions { display: none; }
+  /* Phones: the decision bar sticks to the top of the screen while you scroll the copies
+     and tracks, with previous/next in place of J/K. */
+  @media (max-width: 760px) {
+    .head { flex-direction: column; align-items: stretch; gap: 10px; margin-bottom: 8px; }
+    .desk-actions { display: none; }
+    .phone-actions { display: flex; margin-bottom: 14px; }
+    .actions {
+      position: sticky; top: 0; z-index: 5; margin: 0 -16px; padding: 8px 16px;
+      background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--line-soft); flex-wrap: nowrap;
+    }
+    .actions .btn { padding: 9px 14px; }
+    .actions .primary { flex: 1; justify-content: center; }
+    .step { display: inline-flex; font-size: 18px; padding: 6px 14px !important; }
+    .verdict { display: none; }
+  }
   .verdict { font-family: var(--font-mono); font-size: 12px; padding: 4px 8px; border-radius: 4px; }
   .verdict.accept { color: var(--keep); background: var(--keep-soft); }
   .verdict.skip { color: var(--skip); border: 1px solid var(--line); }

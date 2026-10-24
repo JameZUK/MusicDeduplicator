@@ -124,7 +124,7 @@
   <section class="detail">
     {#if current}
       {#key current.id}
-        <GroupDetail group={current} onchoose={choose} />
+        <GroupDetail group={current} onchoose={choose} onstep={step} />
       {/key}
     {:else}
       <div class="panel nothing">
@@ -177,6 +177,7 @@
   .artist { font-size: 12px; color: var(--ink-3); }
   .meta { font-size: 11px; color: var(--ink-3); }
   .empty { padding: 18px 12px; color: var(--ink-3); font-size: 13.5px; }
+  @media (hover: none) and (pointer: coarse) { .keys { display: none !important; } }
   .keys { margin: 0; padding: 10px 14px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--ink-3); display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
 
   .nothing { padding: 40px; text-align: center; }
@@ -184,6 +185,6 @@
 
   @media (max-width: 900px) {
     .review { grid-template-columns: 1fr; }
-    .queue { position: static; max-height: 340px; }
+    .queue { position: static; max-height: 230px; }
   }
 </style>

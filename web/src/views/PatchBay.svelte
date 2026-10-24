@@ -95,7 +95,38 @@
       {/each}
     </ol>
   </div>
-  <p class="hint">▶ plays a track with its kept copy (switch with <kbd>1</kbd>/<kbd>2</kbd>). Click a track name for the full comparison with waveforms.</p>
+  <!-- Phones: no room for two columns and cables, so one row per track of this copy,
+       with the kept copy it matches underneath. -->
+  <ol class="pairs">
+    {#each right as t, j (t.path)}
+      {@const c = cables.find((x) => x.j === j)}
+      {@const k = c ? left[c.i] : null}
+      <li class:unmatched={!c}>
+        <div class="pair-main">
+          <span class="no mono">{t.track || '·'}</span>
+          {#if c}
+            <button class="pair-title" onclick={() => open(c)}>{title(t)}</button>
+          {:else}
+            <span class="pair-title">{title(t)}</span>
+          {/if}
+          <Quality track={t} />
+          {#if c}
+            <button class="listen" class:on={isPlaying(c)} onclick={() => listen(c)}
+              aria-label={isPlaying(c) ? 'Pause' : `Play ${title(t)} and its kept copy`}>{isPlaying(c) ? '❚❚' : '▶'}</button>
+          {/if}
+        </div>
+        <div class="pair-keep">
+          {#if k}<span>kept: {k.track ? `${k.track}. ` : ''}{title(k)}</span> <Quality track={k} />
+          {:else}<span>no match in the kept copy</span>{/if}
+        </div>
+      </li>
+    {/each}
+  </ol>
+
+  <p class="hint">
+    <span class="desk">▶ plays a track with its kept copy (switch with <kbd>1</kbd>/<kbd>2</kbd>). Click a track name for the full comparison with waveforms.</span>
+    <span class="touch">▶ plays a track with its kept copy. Tap a track name for the full comparison with waveforms.</span>
+  </p>
 </section>
 
 <style>
@@ -108,19 +139,19 @@
   .gutter-head { text-align: center; }
 
   .col { list-style: none; margin: 0; padding: 0; min-width: 0; }
-  li, .row {
+  .col > li, .row {
     height: var(--row); display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; gap: 10px; align-items: center;
     padding: 0 8px; border-radius: 5px; font-size: 13.5px; transition: background .12s, opacity .12s;
   }
-  li:has(.row) { padding: 0; display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 0; align-items: center; }
+  .col > li:has(.row) { padding: 0; display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 0; align-items: center; }
   .listen { all: unset; cursor: pointer; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
     font-size: 10px; color: var(--ink-3); border: 1px solid var(--line); align-self: center; }
   .listen:hover, .listen.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
   .listen:focus-visible { outline: 2px solid var(--accent); }
   .row { all: unset; box-sizing: border-box; width: 100%; height: var(--row); display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 0 8px; border-radius: 5px; cursor: pointer; }
   .row:focus-visible { outline: 2px solid var(--accent); }
-  li.lit, li.lit .row { background: var(--accent-soft); }
-  li.dim { opacity: .45; }
+  .col > li.lit, .col > li.lit .row { background: var(--accent-soft); }
+  .col > li.dim { opacity: .45; }
   .no { color: var(--ink-3); font-size: 11.5px; text-align: right; }
   .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dur { font-size: 11.5px; color: var(--ink-3); }
@@ -132,9 +163,20 @@
 
   .hint { margin: 10px 0 0; font-size: 12px; color: var(--ink-3); }
 
+  .pairs { display: none; list-style: none; margin: 0; padding: 0; }
+  .touch { display: none; }
+  @media (hover: none) and (pointer: coarse) { .desk { display: none; } .touch { display: inline; } }
   @media (max-width: 700px) {
-    header, .body { grid-template-columns: minmax(0, 1fr) 40px minmax(0, 1fr); }
-    .cables { width: 40px; }
-    .dur { display: none; }
+    header, .body { display: none; }
+    .pairs { display: block; }
+    .pairs li { padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
+    .pairs li.unmatched { opacity: .55; }
+    .pair-main { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto 40px; gap: 8px; align-items: center; }
+    .pair-title { all: unset; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14.5px; }
+    button.pair-title { cursor: pointer; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
+    .pair-keep { display: flex; gap: 6px; align-items: center; margin: 4px 0 0 32px; font-size: 12px; color: var(--keep); min-width: 0; }
+    .pair-keep span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .unmatched .pair-keep { color: var(--ink-3); }
+    .pairs .listen { width: 36px; height: 36px; font-size: 12px; }
   }
 </style>
